@@ -8,7 +8,9 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const ROOT = path.resolve(fileURLToPath(new URL("../..", import.meta.url)));
-export const CLI = path.join(ROOT, "bin", "slipway");
+// The repo root is the installed plugin's root, so bin/ is there.
+export const REPO = path.dirname(ROOT);
+export const CLI = path.join(REPO, "bin", "slipway");
 export const GUARD = path.join(ROOT, "hooks", "guard.mjs");
 
 // routes: [method, RegExp, (ctx) => ({ status, json } | { status, text })]
@@ -47,6 +49,15 @@ export async function mockDeployer(routes) {
 export function tempDir(prefix = "slipway-test-") {
   const dir = mkdtempSync(path.join(tmpdir(), prefix));
   return { dir, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+}
+
+// A stub command in dir/stub-bin: a bash script body.
+export function stubCommand(dir, name, body) {
+  const bin = path.join(dir, "stub-bin");
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(path.join(bin, name), `#!/usr/bin/env bash\n${body}\n`);
+  chmodSync(path.join(bin, name), 0o755);
+  return bin;
 }
 
 // A `gh` that logs its arguments and answers the calls the CLI makes.
@@ -98,8 +109,7 @@ export function appRepo(dir, { name = "loan-tracker", secrets = [] } = {}) {
       "",
       secrets.length ? `secrets:\n${secrets.map((s) => `  - ${s}`).join("\n")}` : "secrets: []",
       "",
-      "# Platform-owned (dev team approval required to change)",
-      "auth: clerk",
+      "# Platform-owned (changes need a review from CODEOWNERS)",
       "auto_merge: true",
       "sizes:",
       "  staging: small",
@@ -114,8 +124,15 @@ export function runCli(args, { cwd = ROOT, env = {}, input } = {}) {
   return new Promise((resolve) => {
     const child = spawn(process.execPath, [CLI, ...args], {
       cwd,
-      // XDG_CONFIG_HOME: never read the developer's own `slipway setup` config.
-      env: { ...process.env, ...GIT_ENV, XDG_CONFIG_HOME: NO_CONFIG, SLIPWAY_GH_TOKEN: "fake:alice", ...env },
+      // XDG_*: never read the developer's own config or touch their cache.
+      env: {
+        ...process.env,
+        ...GIT_ENV,
+        XDG_CONFIG_HOME: NO_CONFIG,
+        XDG_CACHE_HOME: NO_CONFIG,
+        SLIPWAY_GH_TOKEN: "fake:alice",
+        ...env,
+      },
     });
     let stdout = "";
     let stderr = "";

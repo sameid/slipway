@@ -1,20 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { App } from "./App";
 
-// Clerk is replaced by a stub whose signed-in state each test sets.
-const clerk = vi.hoisted(() => ({ signedIn: false }));
-
-vi.mock("@clerk/react", () => ({
-  Show: ({ when, children }: { when: string; children: React.ReactNode }) =>
-    (when === "signed-in") === clerk.signedIn ? children : null,
-  SignIn: () => <div>Clerk sign-in</div>,
-  UserButton: () => <button>User menu</button>,
-  useAuth: () => ({ getToken: async () => (clerk.signedIn ? "session-token" : null) }),
-}));
-
-const config = { clerkPublishableKey: "pk_test_x", env: "local", release: "dev" };
+const config = { env: "staging", release: "dev" };
 
 function renderApp() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -25,48 +14,57 @@ function renderApp() {
   );
 }
 
-const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
-  const body =
-    String(input) === "/api/me"
-      ? { user: { id: 7, clerkId: "user_123", email: "jane@example.com", name: "Jane", createdAt: "" } }
-      : { ok: true, release: "a1b2c3d", migrations: 1 };
-  return new Response(JSON.stringify(body), { headers: { "Content-Type": "application/json" } });
+const json = (body: unknown, status = 200) =>
+  new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
+
+let notes = [{ id: 1, body: "First note", createdAt: "" }];
+let notesDown = false;
+
+const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+  if (String(input) === "/api/notes" && init?.method === "POST") {
+    const note = { id: 2, body: JSON.parse(String(init.body)).body, createdAt: "" };
+    notes = [note, ...notes];
+    return json({ note }, 201);
+  }
+  if (String(input) === "/api/notes") {
+    return notesDown ? new Response("database unavailable", { status: 503 }) : json({ notes });
+  }
+  return json({ ok: true, release: "a1b2c3d", migrations: 1 });
 });
 
 beforeEach(() => {
-  fetchMock.mockReset(); // back to the default responses above
+  notes = [{ id: 1, body: "First note", createdAt: "" }];
+  notesDown = false;
+  fetchMock.mockClear();
   vi.stubGlobal("fetch", fetchMock);
 });
 
 describe("App", () => {
-  it("shows Clerk's sign-in when signed out", async () => {
-    clerk.signedIn = false;
+  it("lists notes and the running releases", async () => {
     renderApp();
 
-    expect(screen.getByText("Clerk sign-in")).toBeInTheDocument();
-    expect(screen.queryByText("User menu")).not.toBeInTheDocument();
+    expect(await screen.findByText("First note")).toBeInTheDocument();
+    expect(await screen.findByText("staging · web dev · api a1b2c3d")).toBeInTheDocument();
   });
 
-  it("shows the local user when signed in, sending the session token", async () => {
-    clerk.signedIn = true;
+  it("adds a note and shows it", async () => {
     renderApp();
+    await screen.findByText("First note");
 
-    expect(await screen.findByText(/Signed in as jane@example.com/)).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Welcome, Jane" })).toBeInTheDocument();
-    const [, init] = fetchMock.mock.calls.find(([input]) => String(input) === "/api/me")!;
-    expect(new Headers(init?.headers).get("Authorization")).toBe("Bearer session-token");
+    fireEvent.change(screen.getByLabelText("New note"), { target: { value: "Second note" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add" }));
+
+    expect(await screen.findByText("Second note")).toBeInTheDocument();
+    const post = fetchMock.mock.calls.find(([, init]) => init?.method === "POST");
+    expect(JSON.parse(String(post?.[1]?.body))).toEqual({ body: "Second note" });
+    await waitFor(() => expect(screen.getByLabelText("New note")).toHaveValue(""));
   });
 
-  it("shows an alert when the profile can't load", async () => {
-    clerk.signedIn = true;
-    fetchMock.mockImplementation(async (input) =>
-      String(input) === "/api/me"
-        ? new Response("database unavailable", { status: 503 })
-        : new Response(JSON.stringify({ ok: true, release: "a1b2c3d", migrations: 1 })),
-    );
+  it("shows an alert when notes can't load", async () => {
+    notesDown = true;
     renderApp();
 
-    expect(await screen.findByText("Couldn't load your profile")).toBeInTheDocument();
+    expect(await screen.findByText("Couldn't load notes")).toBeInTheDocument();
     expect(screen.getByText("503 database unavailable")).toBeInTheDocument();
   });
 });

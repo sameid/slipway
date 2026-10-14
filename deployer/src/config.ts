@@ -18,11 +18,12 @@ export type Config = {
   allowedUsers: string[];
   /** CODEOWNERS entry for platform-owned files in new apps; unset uses a default (see /api/whoami). */
   codeowners?: string;
+  /** SSM parameter holding allowedUsers and codeowners as JSON; read at startup in place of the env vars. */
+  githubAccessParam?: string;
   /** The runner's Unix socket (docs/contracts.md, "Runner"). */
   runnerSocket: string;
   githubAppSecretId: string;
   githubApp?: { appId: string; privateKey: string; webhookSecret: string };
-  clerkLocalSecretId: string;
   /** KMS key for app secrets. Unset: SSM's AWS-managed key (aws/ssm), which is what production uses. */
   secretsKmsKeyId?: string;
   /** The deployer's public URL (https://dxxxx.cloudfront.net). Production sets it in deployer.env. */
@@ -38,6 +39,16 @@ export type Config = {
   /** Fake mode only: simulate an org or a personal account (FAKE_OWNER_TYPE=User). */
   fakeOwnerType: OwnerType;
 };
+
+const logins = (list: string[]) => list.map((login) => login.trim().replace(/^@/, "").toLowerCase()).filter(Boolean);
+
+/** Apply GITHUB_ACCESS_PARAM's value: {"allowedUsers": ["login"], "codeowners": "@org/team"}. */
+export function withGithubAccess(config: Config, json: string): Config {
+  const value = JSON.parse(json) as { allowedUsers?: unknown; codeowners?: unknown };
+  const allowed = Array.isArray(value.allowedUsers) ? value.allowedUsers.filter((u): u is string => typeof u === "string") : [];
+  const codeowners = typeof value.codeowners === "string" ? value.codeowners.trim() : "";
+  return { ...config, allowedUsers: logins(allowed), codeowners: codeowners || undefined };
+}
 
 function env(name: string, fallback?: string): string {
   const value = process.env[name];
@@ -72,15 +83,12 @@ export function loadConfig(): Config {
     dataDir,
     dbFile: join(dataDir, "deployer.db"),
     owner: env("GITHUB_OWNER", fake ? "acme" : undefined),
-    allowedUsers: (process.env.GITHUB_ALLOWED_USERS ?? "")
-      .split(/[\s,]+/)
-      .map((login) => login.trim().replace(/^@/, "").toLowerCase())
-      .filter(Boolean),
+    allowedUsers: logins((process.env.GITHUB_ALLOWED_USERS ?? "").split(/[\s,]+/)),
     codeowners: process.env.GITHUB_CODEOWNERS || undefined,
+    githubAccessParam: process.env.GITHUB_ACCESS_PARAM || undefined,
     runnerSocket: env("RUNNER_SOCKET", fake || !production ? "./data/runner/runner.sock" : undefined),
     githubAppSecretId: env("GITHUB_APP_SECRET_ID", "slipway/github-app"),
     githubApp,
-    clerkLocalSecretId: env("CLERK_LOCAL_SECRET_ID", "slipway/clerk/local"),
     secretsKmsKeyId: process.env.SECRETS_KMS_KEY_ID || undefined,
     publicUrl: process.env.PUBLIC_URL || (fake ? `http://localhost:${env("PORT", "8080")}` : undefined),
     publicUrlParam: process.env.PUBLIC_URL_PARAM || undefined,

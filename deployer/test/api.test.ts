@@ -174,16 +174,6 @@ describe("plugin API", () => {
     expect(getApp(t.deps, "loan-tracker")).toMatchObject({ status: "destroy_requested", destroyRequestedBy: "alice" });
   });
 
-  it("hands out local-development Clerk keys, or says they're missing", async () => {
-    const t = setup();
-    const api = await client(t);
-    expect((await api("/api/dev-config")).body).toEqual({ clerkPublishableKey: "pk_test_fake", clerkSecretKey: "sk_test_fake" });
-    t.platform.devConfig = async () => {
-      throw new Error("ResourceNotFoundException");
-    };
-    expect((await api("/api/dev-config")).status).toBe(503);
-  });
-
   it("shows the failed job when the first deploy fails", async () => {
     const t = setup();
     const api = await client(t);

@@ -1,0 +1,17 @@
+{
+  "name": "slipway",
+  "displayName": "slipway",
+  "version": "0.4.0",
+  "description": "Build and ship apps on your own AWS and GitHub accounts: /setup puts slipway in your AWS account, /new-app gives you a GitHub repo and a live staging link, /ship opens a PR that auto-merges and deploys, /status, /secret and /destroy-app do the rest.",
+  "author": {
+    "name": "sameid",
+    "url": "https://github.com/sameid"
+  },
+  "homepage": "https://github.com/sameid/slipway",
+  "repository": "https://github.com/sameid/slipway",
+  "license": "MIT",
+  "keywords": ["slipway", "aws", "deploy", "self-hosted"],
+  "commands": "./plugin/commands",
+  "skills": "./plugin/skills",
+  "hooks": "./plugin/hooks/hooks.json"
+}

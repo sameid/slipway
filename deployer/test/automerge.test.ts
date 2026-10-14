@@ -18,13 +18,13 @@ async function passingCheck(t: ReturnType<typeof setup>, number: number) {
 }
 
 describe("platform-owned fields", () => {
-  it("spots changes to name, auth, auto_merge and sizes only", () => {
+  it("spots changes to name, auto_merge and sizes only", () => {
     const base = defaultAppYaml("loan-tracker");
     expect(changedPlatformFields(base, base.replace("EXAMPLE_API_KEY", "STRIPE_KEY"))).toEqual([]);
     expect(changedPlatformFields(base, base.replace("description: Fake", "description: Real"))).toEqual([]);
     expect(changedPlatformFields(base, base.replace("prod: small", "prod: large"))).toEqual(["sizes"]);
     expect(changedPlatformFields(base, base.replace("auto_merge: true", "auto_merge: false"))).toEqual(["auto_merge"]);
-    expect(changedPlatformFields(base, base.replace("auth: clerk\n", ""))).toEqual(["auth"]);
+    expect(changedPlatformFields(base, base.replace("name: loan-tracker", "name: loan-tracker-2"))).toEqual(["name"]);
     expect(changedPlatformFields(base, "name: [oops")).toEqual(["app.yaml (not valid YAML)"]);
   });
 });
@@ -78,8 +78,8 @@ describe("auto-merge", () => {
       note: expect.stringContaining("(sizes)"),
     });
 
-    const secret = t.github.openPull(REPO, { files: { "app.yaml": `${yaml}  - STRIPE_KEY\n`.replace("auth: clerk\n", "") } });
-    // (that one also drops auth, so it's blocked too)
+    const secret = t.github.openPull(REPO, { files: { "app.yaml": `${yaml}  - STRIPE_KEY\n`.replace("auto_merge: true\n", "") } });
+    // (that one also drops auto_merge, so it's blocked too)
     await passingCheck(t, secret.number);
     expect(pullJson(t.deps, getApp(t.deps, "loan-tracker")!, secret.number).status).toBe("blocked");
 

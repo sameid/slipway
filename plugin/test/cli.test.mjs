@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { after, before, describe, test } from "node:test";
 import { parseAppYaml } from "../cli/app.mjs";
 import { fillPlaceholders } from "../cli/new-app.mjs";
-import { app, appRepo, job, mockDeployer, ROOT, runCli, stubGh, tempDir } from "./helpers/harness.mjs";
+import { app, appRepo, job, mockDeployer, REPO, ROOT, runCli, stubGh, tempDir } from "./helpers/harness.mjs";
 
 const FAST = ["--interval", "0.02"];
 
@@ -27,9 +27,9 @@ describe("argument handling", () => {
     assert.match(r.stderr, /\/setup/);
   });
 
-  test("setup refuses a URL that isn't https (except localhost)", async () => {
-    assert.equal((await runCli(["setup", "--deployer-url", "not a url"])).code, 2);
-    const r = await runCli(["setup", "--deployer-url", "http://deployer.example.com"]);
+  test("connect refuses a URL that isn't https (except localhost)", async () => {
+    assert.equal((await runCli(["connect", "not a url"])).code, 2);
+    const r = await runCli(["connect", "http://deployer.example.com"]);
     assert.equal(r.code, 2);
     assert.match(r.stderr, /https:\/\//);
   });
@@ -49,7 +49,7 @@ describe("argument handling", () => {
 describe("app.yaml and placeholders", () => {
   test("parses the fields the CLI uses", () => {
     const parsed = parseAppYaml(
-      'name: my-app\ntemplate: react-express\ndescription: "x # y"\nowner: jane   # GitHub username\nsecrets:\n  - STRIPE_KEY\n  - "OPENAI_API_KEY"\n\nauth: clerk\n',
+      'name: my-app\ntemplate: react-express\ndescription: "x # y"\nowner: jane   # GitHub username\nsecrets:\n  - STRIPE_KEY\n  - "OPENAI_API_KEY"\n\nauto_merge: true\n',
     );
     assert.deepEqual(parsed, { name: "my-app", template: "react-express", owner: "jane", secrets: ["STRIPE_KEY", "OPENAI_API_KEY"] });
     assert.deepEqual(parseAppYaml("name: a\nsecrets: [A, 'B']\n").secrets, ["A", "B"]);
@@ -111,11 +111,11 @@ describe("against a mock deployer", () => {
     return () => responses[Math.min(i++, responses.length - 1)];
   };
 
-  test("setup saves the URL in the user's config and checks it with the deployer", async () => {
+  test("connect saves the URL in the user's config and checks it with the deployer", async () => {
     const home = tempDir();
     try {
       const own = { XDG_CONFIG_HOME: home.dir, SLIPWAY_DEPLOYER_URL: "" };
-      const r = await runCli(["setup", "--deployer-url", `${deployer.url}/`], { env: own });
+      const r = await runCli(["connect", `${deployer.url}/`], { env: own });
       assert.equal(r.code, 0, r.stderr);
       assert.match(r.stdout, /New apps are created under acme/);
       const saved = JSON.parse(readFileSync(path.join(home.dir, "slipway", "config.json"), "utf8"));
@@ -259,10 +259,10 @@ describe("against a mock deployer", () => {
   });
 
   test("wait-pr: blocked exits 4 with the note", async () => {
-    state.pull = () => ({ json: { number: 5, headSha: "abc", status: "blocked", live: false, note: "changes platform-owned files; needs dev team review" } });
+    state.pull = () => ({ json: { number: 5, headSha: "abc", status: "blocked", live: false, note: "changes platform-owned files; needs a review from CODEOWNERS" } });
     const r = await runCli(["wait-pr", "5", ...FAST], { cwd: repo, env: env() });
     assert.equal(r.code, 4);
-    assert.match(r.stdout, /needs dev team review/);
+    assert.match(r.stdout, /needs a review from CODEOWNERS/);
   });
 
   test("status prints both environments", async () => {
@@ -329,8 +329,27 @@ describe("against a mock deployer", () => {
 });
 
 test("the plugin's own files exist where commands reference them", () => {
-  for (const file of ["bin/slipway", "hooks/guard.mjs", "skills/coding-agent/scripts/new-worktree.sh", "skills/coding-agent/scripts/clean-worktrees.sh"]) {
-    const mode = statSync(path.join(ROOT, file)).mode;
+  // ${CLAUDE_PLUGIN_ROOT} is the repo root.
+  for (const file of [
+    "bin/slipway",
+    "plugin/hooks/guard.mjs",
+    "plugin/skills/coding-agent/scripts/new-worktree.sh",
+    "plugin/skills/coding-agent/scripts/clean-worktrees.sh",
+    "deployer/scripts/release.sh",
+    "deployer/scripts/pack.sh",
+  ]) {
+    const mode = statSync(path.join(REPO, file)).mode;
     assert.ok(mode & 0o100, `${file} should be executable`);
   }
+  const manifest = JSON.parse(readFileSync(path.join(REPO, ".claude-plugin", "plugin.json"), "utf8"));
+  for (const key of ["commands", "skills", "hooks"]) assert.ok(existsSync(path.join(REPO, manifest[key])), `${key}: ${manifest[key]}`);
+  const references = [];
+  for (const dir of ["plugin/commands", "plugin/hooks"]) {
+    for (const name of readdirSync(path.join(REPO, dir))) {
+      const text = readFileSync(path.join(REPO, dir, name), "utf8");
+      for (const [, ref] of text.matchAll(/\$\{CLAUDE_PLUGIN_ROOT\}\/([\w./-]+)/g)) references.push(`${dir}/${name}: ${ref}`);
+    }
+  }
+  assert.ok(references.length > 5);
+  for (const ref of references) assert.ok(existsSync(path.join(REPO, ref.split(": ")[1])), ref);
 });

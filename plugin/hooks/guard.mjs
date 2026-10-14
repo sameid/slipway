@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // PreToolUse guard for slipway app repos. Blocks changes to .github/, CODEOWNERS and the
-// platform-owned fields of app.yaml (name, auth, auto_merge, sizes). Branch protection and
+// platform-owned fields of app.yaml (name, auto_merge, sizes). Branch protection and
 // the deployer enforce the same rules on GitHub; this just stops the agent early.
 //
 // It only acts inside a slipway app repo (git root has an app.yaml with a template key)
@@ -9,7 +9,7 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
-export const PLATFORM_FIELDS = ["name", "auth", "auto_merge", "sizes"];
+export const PLATFORM_FIELDS = ["name", "auto_merge", "sizes"];
 
 const EDIT_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
 
@@ -33,13 +33,16 @@ function checkFile(file, tool, toolInput) {
   const rel = path.relative(root, file).split(path.sep).join("/");
   if (rel === ".github" || rel.startsWith(".github/")) {
     return (
-      "slipway: .github/ is owned by the dev team in slipway apps, so agents don't change it. " +
-      "Builds and deploys run in the platform's CodeBuild, not GitHub Actions. If this change is really " +
-      "needed, tell the colleague to ask the dev team."
+      "slipway: .github/ is platform-owned in slipway apps, so agents don't change it. " +
+      "Builds and deploys run on slipway's deployer, not in GitHub Actions. If this change is really " +
+      "needed, tell the user: someone in the app's CODEOWNERS changes it by hand."
     );
   }
   if (rel === "CODEOWNERS" || rel === "docs/CODEOWNERS") {
-    return "slipway: CODEOWNERS is owned by the dev team in slipway apps. Ask the dev team if it needs to change.";
+    return (
+      "slipway: CODEOWNERS is platform-owned in slipway apps, so agents don't change it. If it needs to " +
+      "change, tell the user: someone it lists changes it by hand."
+    );
   }
   if (rel !== "app.yaml") return null;
 
@@ -50,8 +53,8 @@ function checkFile(file, tool, toolInput) {
   if (!changed.length) return null;
   return (
     `slipway: this edit changes ${changed.join(", ")} in app.yaml. ${PLATFORM_FIELDS.join(", ")} are ` +
-    "platform-owned and need dev team approval, so leave them as they are and tell the colleague to ask the " +
-    "dev team. Other fields (description, api, web, secrets) can be edited."
+    "platform-owned and need a review from the app's CODEOWNERS, so leave them as they are and tell the " +
+    "user. Other fields (description, api, web, secrets) can be edited."
   );
 }
 
@@ -143,7 +146,7 @@ function checkBash(command, cwd) {
   return (
     "slipway: this command looks like it changes .github/, CODEOWNERS or app.yaml, which are guarded in " +
     "slipway apps. Edit app.yaml with the Edit tool instead (description, api, web and secrets are fine to " +
-    "change; name, auth, auto_merge and sizes need the dev team). .github/ and CODEOWNERS belong to the dev team."
+    "change; name, auto_merge and sizes need a CODEOWNERS review). .github/ and CODEOWNERS are platform-owned."
   );
 }
 

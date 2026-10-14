@@ -61,20 +61,6 @@ export function apiRoutes(deps: Deps): express.Router {
     }),
   );
 
-  router.get(
-    "/dev-config",
-    route(deps, async (_req, res) => {
-      let config;
-      try {
-        config = await deps.platform.devConfig();
-      } catch (err) {
-        deps.log("dev-config unavailable", { error: String(err) });
-        throw new ApiError(503, "Local-development Clerk keys aren't set up yet (slipway/clerk/local); ask the dev team");
-      }
-      res.json({ clerkPublishableKey: config.publishableKey, clerkSecretKey: config.secretKey });
-    }),
-  );
-
   router.post(
     "/apps",
     route(deps, async (req, res) => {

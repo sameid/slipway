@@ -152,14 +152,14 @@ The deployer exits on start if `PUBLIC_URL` isn't set or the `slipway/github-app
 
 **AWS calls the deployer makes:**
 The instance has one role, shared by the deployer and the runner; the foundation grants it what deploys need in its region. The deployer's own calls are:
-- `secretsmanager:GetSecretValue` on `slipway/github-app` and `slipway/clerk/local`.
+- `secretsmanager:GetSecretValue` on `slipway/github-app`.
 - `ssm:PutParameter` on `/apps/*` (SecureString, AWS-managed key). The deployer never reads app secret values back; nothing in its code calls `GetParameter` on `/apps/*`.
 - `cloudwatch:PutMetricData` with namespace `slipway`.
 - `sns:Publish` to the alerts topic.
 
 ## How jobs run
 
-- **Plugin API access:** the colleague's `gh auth token` names a GitHub login. If the owner is an org, the login must be a member of it. If it's a personal account, the login must be the owner or be listed in `GITHUB_ALLOWED_USERS` (those colleagues also need write access to the app repos, and only the owner can create repos there, so only the owner can run `/new-app`).
+- **Plugin API access:** the colleague's `gh auth token` names a GitHub login. If the owner is an org, the login must be a member of it. If it's a personal account, the login must be the owner or be an allowed user: on the instance, from the `/slipway/deployer/github-access` parameter (`slipway setup --allowed-users`), and locally from `GITHUB_ALLOWED_USERS` (those colleagues also need write access to the app repos, and only the owner can create repos there, so only the owner can run `/new-app`).
 - **Registration** protects `main` (PRs required, the check must pass, no force pushes; on org repos only the App may push). GitHub Free can't protect private repos: then registration still succeeds, returns a `warning` the plugin prints, and `main` stays unprotected, so a direct push to `main` deploys to staging without a check. GitHub Pro or Team fixes that. Registration then queues `deploy shared`, then `build` of main's head, then `deploy staging`. Each waits for the previous one to succeed, and a failure fails the rest. The first failure is recorded on the app (`failedJob`) and the app becomes `failed`. Its owner can register it again to retry.
 - **Concurrency:** one running job per `(app, env)`; checks are keyed per PR, so checks for different PRs run in parallel. Builds and deploys wait until the app's shared stack has deployed.
 - **Superseding:** of several queued staging deploys for an app, only the newest runs. A new PR head supersedes queued checks for the old one.
@@ -180,7 +180,7 @@ The instance has one role, shared by the deployer and the runner; the foundation
 
 ## Releasing
 
-A release is everything the instance runs: the deployer, the runner, `../jobs` and `../modules`, and the pm2 and Caddy configs. Changing a job script or a module means releasing.
+A release is everything the instance runs: the deployer, the runner, `../jobs` and `../modules`, and the pm2 and Caddy configs. Changing a job script or a module means releasing. `slipway setup` releases `<plugin version>-<timestamp>` from the installed plugin with `YES=1 SKIP_CHECKS=1` when the deployer doesn't run that plugin version yet. To release a checkout by hand:
 
 ```sh
 export AWS_PROFILE=<platform account profile>
@@ -189,7 +189,7 @@ deployer/scripts/release.sh            # or release.sh <version>
 ```
 
 It shows the account and region and asks for `yes`, then:
-1. Runs typecheck and tests for the deployer and `jobs/`, builds, and packs the tarball (`scripts/pack.sh`).
+1. Copies the deployer and `jobs/` to a scratch directory, runs their typecheck and tests there (`SKIP_CHECKS=1` skips them), builds, and packs the tarball (`scripts/pack.sh`). Nothing is written to the checkout.
 2. Uploads the tarball to `s3://slipway-artifacts-<account>/deployer/<version>.tgz` (override with `RELEASES_BUCKET`).
 3. Creates or updates `/slipway/deployer/version`.
 4. Runs `/opt/slipway/bin/update-deployer.sh` on the instance through SSM Run Command and prints its output. That installs the release, runs `jobs/install-tools.sh` (Terraform and gitleaks at the versions in `jobs/versions.env`), installs the Caddyfile, and reloads pm2. The runner finishes the runs it has going before it restarts (up to about 15 minutes), so the command can take a while; runs that are still going after that fail and can be retried.

@@ -1,274 +1,120 @@
-# Foundation runbook: self-hosting slipway
+# Setup and operations
 
-This runbook takes your own AWS account and your own GitHub org or personal account to a running slipway: the deployer host behind CloudFront, its IAM role, the permissions boundary for app roles, the artifacts bucket, alerts and a budget, then your Clerk applications, your GitHub App, the first release, the first admin, and the plugin on colleagues' laptops. It covers design 11 steps 1 and 2. Step 3 (the first app) starts once this is done.
+`/setup` in Claude Code (the `slipway setup` CLI) takes your own AWS account and your own GitHub org or personal account to a running slipway: the state bucket, the foundation (deployer host behind CloudFront, its IAM role, the permissions boundary for app roles, the artifacts bucket, alerts and a budget), a GitHub App, the deployer release and your dashboard account. This page says what it does at each step, how to change things later, how to operate the deployer host, and how to do it all by hand.
 
-Run every command from the root of this repo. Every command block that touches AWS starts with a `# [AWS]` comment. Read those before you run them, and check `aws sts get-caller-identity` shows the right account first.
+What gets created is in `foundation/*.tf` (about 20 resources); the names other components rely on are in [contracts.md](contracts.md).
 
-What gets created is in `foundation/*.tf` (about 17 resources); the names other components rely on are in [contracts.md](contracts.md).
-
-**The region is dedicated to slipway.** The foundation uses the region's default VPC and subnets instead of building a network, and the deployer's role may do anything in the region. Don't run anything else there. A separate AWS account just for slipway is best. Outside the region (IAM, CloudFront), the role is scoped tightly.
+**The region is dedicated to slipway.** The foundation uses the region's default VPC and subnets instead of building a network, and the deployer's role may do anything in the region. Don't run anything else there. A separate AWS account just for slipway is best. Outside the region (IAM, CloudFront), the role is scoped tightly. There's one slipway per AWS account: its state bucket is named after the account.
 
 **There's no CodeBuild.** Builds and deploys run on the deployer instance itself, in a second process called the runner (contracts.md, "Runner"). That keeps the platform to one instance and works in every region. The instance runs the deployer and the runner under pm2 (pm2-logrotate rotates their logs), with Caddy in front and CloudFront in front of Caddy.
 
-## 0. Before you start
+## Running setup
 
-### Choose where it runs
+```
+slipway setup --region <region> --email <email> [--owner <org-or-login>] [--profile <aws-profile>]   # checks only
+slipway setup ... --yes                                                                               # does it
+```
 
-- **AWS account and region.** Any region where the checks in step 1 pass. The region is slipway's alone.
-- **GitHub owner.** Every app repo is created under one GitHub org or personal account (`github_owner`). The deployer's GitHub App is installed on all of that owner's repositories and can write to every one of them, so use an org or account that holds only slipway apps.
+`/setup` runs these for you, and asks before the `--yes` run. Without `--yes`, setup only reads: it checks your tools, your AWS and GitHub accounts and the region, and prints what it would create. With `--yes` it creates, or updates, everything. Each step skips what's already done, so running it again after a failure, or after updating the plugin, carries on. A second run needs no flags: the region and AWS profile are in `~/.config/slipway/config.json`, and the foundation's inputs are stored next to its state in your account.
+
+| Flag | |
+|---|---|
+| `--region` | required the first time; dedicated to slipway |
+| `--email` | required the first time: AWS alerts, the budget's emails, and your dashboard account |
+| `--owner` | the GitHub org or personal account for app repos. Default: your own account. It can't change later |
+| `--profile` | AWS CLI profile; default `AWS_PROFILE` or the default credentials |
+| `--budget` | monthly AWS Budgets limit in USD for the region (default 500) |
+| `--allowed-users` | personal accounts only: other GitHub logins that may use the deployer, comma-separated |
+| `--codeowners` | `CODEOWNERS` entry for platform-owned files in new apps, e.g. `@your-org/platform`. Default: you on a personal account, the app's creator in an org |
+| `--allow-replace` | let an update replace or delete foundation resources (see step 2) |
+| `--release` | release the deployer even if it already runs this plugin version |
+| `--no-browser` | don't open the GitHub App page; the link is printed either way |
+
+### Checks
+
+- **Tools:** the AWS CLI v2, Terraform 1.11 or later, npm, tar and bash. Homebrew's own `terraform` formula is stuck at 1.5; use `brew tap hashicorp/tap && brew install hashicorp/tap/terraform`.
+- **AWS:** your credentials work, and aren't the root user. Setup needs admin rights; nothing after setup uses your AWS credentials.
+- **GitHub:** the GitHub CLI is signed in. A personal account must be yours, because only you can create its GitHub App and repos. In an org you should be an owner. On GitHub Free it warns that private repos' `main` can't be protected.
+- **Region:** it's enabled for the account, AWS lists every service slipway uses there, it has a default VPC, and one of its zones has a default subnet and offers `t3.small` (setup picks that zone and keeps it). RDS offers `db.t3.micro`, `small` and `medium` for Postgres 17. ECS Express Mode isn't checked: the first app's deploy is the real test of it in a new region.
+
+### What --yes does
+
+1. **State bucket.** Creates `slipway-tfstate-<account>` in your region: versioned, encrypted, private, TLS-only, with old versions kept for 90 days. It holds every Terraform state file (the foundation's and each app environment's) and the foundation's inputs (`foundation/terraform.tfvars.json`).
+2. **Foundation.** Copies `foundation/` to `~/.cache/slipway/foundation-<account>-<region>/`, writes the inputs there and to the state bucket, then runs `terraform init`, `plan` and `apply`. If the plan would replace or delete anything, setup stops and lists it unless you passed `--allow-replace`. Replacing `aws_instance.deployer` loses the deployer's database (see "Replacing the instance"). If the first apply fails because a new IAM role hasn't reached EC2 yet, it tries once more. The first apply takes 10–20 minutes, most of it the CloudFront distribution.
+3. **First boot.** Waits for the instance to check in with Systems Manager, then for its first-boot setup (packages, swap, Docker, Node.js, pm2 and pm2-logrotate, Caddy), about five minutes. If that fails, it shows the end of `/var/log/cloud-init-output.log`.
+4. **GitHub App.** Creates the deployer's GitHub App with GitHub's [manifest flow](https://docs.github.com/en/apps/sharing-github-apps/registering-a-github-app-from-a-manifest). A page on `127.0.0.1` sends your browser to GitHub with the App's settings. You click **Create GitHub App** (renaming it if `slipway-<owner>` is taken), and GitHub sends the browser back with a one-time code. Setup exchanges the code for the App's ID, private key and webhook secret, which go straight into Secrets Manager as `slipway/github-app`. The browser then goes to the App's install page: install it on **All repositories**, so every new app repo is covered. Setup waits until it is. If the secret already holds a working App, this step only checks the installation.
+
+   | App setting | Value |
+   |---|---|
+   | Webhook | `<deployer URL>/webhooks/github`; events: Push, Pull request |
+   | Repository permissions | Administration: read and write · Commit statuses: read and write · Contents: read and write · Metadata: read-only · Pull requests: read and write |
+   | Organization permissions | Members: read-only (orgs only) |
+   | Installable | only on this account |
+
+5. **Deployer release.** Runs `deployer/scripts/release.sh <plugin version>-<timestamp>` from the plugin's own copy of the repo. It builds the deployer in a scratch directory, uploads the release to the artifacts bucket, sets `/slipway/deployer/version`, and runs `/opt/slipway/bin/update-deployer.sh` on the instance through SSM (contracts.md, "Deployer host"). It's skipped when the deployer already runs this plugin version. Setup refuses to install an older plugin version over a newer deployer unless you pass `--release`. When only the GitHub App or the access settings changed, setup restarts the deployer instead.
+6. **Dashboard account and plugin.** Creates a dashboard admin for `--email` on the instance (through SSM, so no SSH or Session Manager plugin is needed) and prints its temporary password once; you choose your own at first sign-in. Then it saves the deployer URL in `~/.config/slipway/config.json` and checks it with the deployer, like `slipway connect`.
+
+Afterwards, confirm the "AWS Notification - Subscription Confirmation" email sent to `--email`, or alerts won't reach you. The budget (`slipway-<region>`) counts only spend billed to the region; CloudFront and other global services don't count towards it.
+
+### Who can use it
+
+Every app repo is created under one GitHub org or personal account. The deployer's GitHub App is installed on all of that owner's repositories and can write to every one of them, so use an owner that holds only slipway apps.
 
 | | Org | Personal account |
 |---|---|---|
-| Who may use the plugin | members of the org | you, plus the logins in `github_allowed_users` |
+| Who may use the deployer | members of the org | you, plus `--allowed-users` |
 | Who can run `/new-app` | members allowed to create repos in the org | only you: nobody else can create repos in your account. Allowed users need write access to each app repo (add them as collaborators) to `/ship` |
 | Merging into `main` | only the deployer's App (push restrictions) | anyone with write access, once the check passes: GitHub has no push restrictions for personal repos |
-| `CODEOWNERS` default | the app's creator; set `github_codeowners` to a team instead, e.g. `@your-org/platform` | you |
+| `CODEOWNERS` default | the app's creator; `--codeowners @your-org/platform` sets a team | you |
+
+Others connect with `/connect <deployer URL>` (`slipway connect <url>`), which saves the URL in their `~/.config/slipway/config.json`. `SLIPWAY_DEPLOYER_URL` overrides the saved URL.
 
 **GitHub Free can't protect private repos.** On Free, registering an app still succeeds, but the deployer can't set branch protection on `main` and `/new-app` prints a warning. A direct push to `main` then deploys to staging without the check. GitHub Pro (personal) or Team (org) removes the limit; on Free, only change `main` through PRs.
 
-### Tools and access
+### Changing things later
 
-- Terraform ≥ 1.11. Install it from HashiCorp's tap (`brew tap hashicorp/tap && brew install hashicorp/tap/terraform`); Homebrew's own formula is stuck at 1.5. The `hashicorp/terraform` Docker image works too.
-- AWS CLI v2, `jq`, and the [Session Manager plugin](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html) for the AWS CLI.
-- Admin credentials for the account, exported as `AWS_PROFILE`. Not the root user.
-- Owner access to the GitHub org (or your personal account), to create the GitHub App.
-- A [Clerk](https://clerk.com) account.
+- **Allowed users and `CODEOWNERS`:** `slipway setup --yes --allowed-users ...` or `--codeowners ...`. They live in the SSM parameter `/slipway/deployer/github-access`, which the deployer reads at startup, so setup restarts the deployer. An empty value (`--allowed-users ""`) clears it.
+- **Email and budget:** `--email`, `--budget`; updated in place. A new email gets a new SNS confirmation email. Your dashboard account keeps its old address; change it on the dashboard.
+- **GitHub owner:** not supported. It would need a new GitHub App and a new deployer instance.
+- **Region:** one slipway per AWS account. Moving means tearing it down (below) and setting up again.
+- **Instance size, volume, swap, runner limits and pinned tools:** by hand (below). These are in the instance's user data, so changing them replaces the instance.
 
-Standing costs once applied: the deployer's `t3.small`, its 40 GB volume and Elastic IP, and the CloudFront distribution. Secrets Manager charges per secret (three or four). There's no NAT gateway.
+## Doing it by hand
 
-```sh
-export AWS_PROFILE=<admin-profile>
-export AWS_REGION=<region>        # dedicated to slipway; every later step uses it
-# [AWS] confirm which account you're about to change
-aws sts get-caller-identity
-```
-
-## 1. Region availability check
-
-Confirm everything the design uses is in your region before building anything (design 5.4, risks table).
+Everything setup does can be done with the repo checked out, AWS credentials for the account (`AWS_PROFILE`) and `AWS_REGION` set. These are also the commands for anything setup doesn't do.
 
 ```sh
-# [AWS] read-only checks
+ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+BUCKET=slipway-tfstate-$ACCOUNT
+TF=~/.cache/slipway/foundation-$ACCOUNT-$AWS_REGION      # setup's working copy; or use foundation/ in a checkout
 
-# Opt-in regions only (most newer regions): expect ENABLED or ENABLED_BY_DEFAULT
-aws account get-region-opt-status --region-name "$AWS_REGION"
-
-# The default VPC and its subnets, which the foundation and every app use
-aws ec2 describe-subnets --filters Name=default-for-az,Values=true \
-  --query 'Subnets[].[AvailabilityZone,SubnetId]' --output text     # one per AZ
-#   none? aws ec2 create-default-vpc
-
-# EC2: the deployer's instance type (x86_64), and which AZs offer it.
-# deployer_az_suffix (default "a") must be one of them.
-aws ec2 describe-instance-type-offerings --location-type availability-zone \
-  --filters Name=instance-type,Values=t3.small --query 'InstanceTypeOfferings[].Location'
-
-# RDS: every size preset (small, medium, large) for Postgres 17. The presets use
-# db.t3 because some regions (ca-west-1, for one) have no db.t4g classes for Postgres.
-for class in db.t3.micro db.t3.small db.t3.medium; do
-  printf '%s: ' "$class"
-  aws rds describe-orderable-db-instance-options --engine postgres \
-    --db-instance-class "$class" \
-    --query "length(OrderableDBInstanceOptions[?starts_with(EngineVersion, '17.')])"
-done                                                                # > 0 for each (--engine-version needs a full version like 17.6)
-
-# ECS Express Mode: a describe call on a service that doesn't exist should fail
-# with a "not found"-style error, not "Unknown operation" or "Could not connect"
-aws ecs describe-express-gateway-service \
-  --service-arn "arn:aws:ecs:$AWS_REGION:$(aws sts get-caller-identity --query Account --output text):service/none/none" \
-  || true
-
-# Services AWS lists for the region: expect all ten
-aws ssm get-parameters-by-path --region us-east-1 \
-  --path "/aws/service/global-infrastructure/regions/$AWS_REGION/services" \
-  --query 'Parameters[].Value' --output text | tr '\t' '\n' | sort \
-  | grep -xE 'ecs|rds|ecr|ssm|secretsmanager|logs|sns|ec2|s3|elb'
+# [AWS] the foundation's inputs, as setup last wrote them
+aws s3 cp "s3://$BUCKET/foundation/terraform.tfvars.json" "$TF/terraform.tfvars.json"
+# edit $TF/terraform.tfvars.json, e.g. add "runner_max_builds": 2, then keep the bucket's copy in step,
+# or the next /setup run will plan to undo the change
+# [AWS] saves the inputs next to the state
+aws s3 cp "$TF/terraform.tfvars.json" "s3://$BUCKET/foundation/terraform.tfvars.json"
+terraform -chdir="$TF" init -backend-config="bucket=$BUCKET" -backend-config="region=$AWS_REGION"
+# [AWS] review the plan before applying it
+terraform -chdir="$TF" plan -out tfplan
+terraform -chdir="$TF" apply tfplan
+terraform -chdir="$TF" output                                  # deployer_url, deployer_instance_id, ...
 ```
 
-The first app's deploy (design 11 step 3) is the real test of ECS Express Mode and Fargate in your region. App tasks run X86_64: provider 6.x's `aws_ecs_express_gateway_service` has no CPU architecture argument, so ARM/Graviton for app tasks is out of scope for now. That's also why the deployer instance is x86_64: it builds the `linux/amd64` app images.
-
-If anything is missing, pick another region.
-
-## 2. Bootstrap the state bucket
-
-Creates `slipway-tfstate-<account>` (versioned, encrypted, private) in your region. This one stack keeps its state locally in `foundation/bootstrap/terraform.tfstate`, which is git-ignored. Keep a copy, for example in the bucket itself (`s3://slipway-tfstate-<account>/bootstrap/terraform.tfstate`). Losing it only means re-importing the bucket.
+setup keeps any input it doesn't manage (it manages the ones in its flags table, plus `region` and `deployer_az_suffix`).
 
 ```sh
-terraform -chdir=foundation/bootstrap init
-# [AWS] creates the state bucket
-terraform -chdir=foundation/bootstrap apply -var "region=$AWS_REGION"
-terraform -chdir=foundation/bootstrap output -raw backend_hcl > foundation/backend.hcl
+# [AWS] publish and roll out a release from a checkout (asks for confirmation)
+deployer/scripts/release.sh [version]
+
+# [AWS] a shell on the instance through Session Manager (needs the Session Manager plugin for the AWS CLI)
+aws ssm start-session --target "$(terraform -chdir="$TF" output -raw deployer_instance_id)"
+sudo /opt/slipway/bin/create-admin --email you@example.com --reset     # new temporary password, admin again
 ```
 
-`backend.hcl` holds the bucket name (which includes your account ID) and the region. It's git-ignored.
+To create the GitHub App by hand, use the settings in step 4 under your org's or account's **Settings → Developer settings → GitHub Apps**. Then generate a private key, install the App on all repositories, and store `{"appId", "privateKey", "webhookSecret"}` as the secret `slipway/github-app`.
 
-## 3. Apply the foundation
-
-```sh
-cp foundation/terraform.tfvars.example foundation/terraform.tfvars
-```
-
-Edit `foundation/terraform.tfvars`:
-
-| Variable | |
-|---|---|
-| `region` | required; the same region as `$AWS_REGION` |
-| `github_owner` | required; the org or personal account that owns app repos |
-| `alert_email` | required; deployer alerts and budget alerts |
-| `github_allowed_users` | personal accounts only: other logins allowed to use the plugin (default none) |
-| `github_codeowners` | `CODEOWNERS` entry for platform-owned files in new apps (default: you on a personal account, the app's creator in an org) |
-| `budget_amount` | monthly AWS Budgets limit in USD for the region (default 500) |
-
-```sh
-# [AWS] reads the state bucket
-terraform -chdir=foundation init -backend-config=backend.hcl
-# [AWS] creates the foundation; review the plan first
-terraform -chdir=foundation plan -out tfplan
-terraform -chdir=foundation apply tfplan
-```
-
-The first apply takes 10–20 minutes, most of it the CloudFront distribution. If it fails right after creating the IAM role with an "invalid IAM instance profile" or similar error, IAM hasn't propagated yet: run `terraform apply` again.
-
-The budget (`slipway-<region>`) counts only spend billed to the region. CloudFront and other global services aren't billed to a region, so they don't count towards it.
-
-Afterwards:
-
-1. Confirm the SNS subscription email sent to `alert_email`.
-2. Note the outputs you'll need below:
-   ```sh
-   terraform -chdir=foundation output deployer_url          # https://dxxxx.cloudfront.net
-   terraform -chdir=foundation output github_webhook_url
-   terraform -chdir=foundation output deployer_instance_id
-   ```
-3. Give the instance about five minutes for first-boot setup (packages, swap, Docker, Node.js, pm2 and pm2-logrotate, Caddy). Then open the deployer URL: it should answer **503 "slipway deployer: no release installed yet"**. That's Caddy's placeholder, and it proves CloudFront → instance works, secret header included. A CloudFront 502/504 instead means the instance isn't answering on 8080 yet: check `/var/log/cloud-init-output.log` through Session Manager. A direct request to the instance's Elastic IP on 8080 should time out (only CloudFront's ranges may connect), and one that gets through without CloudFront's header gets 403.
-
-**Changing a GitHub setting later.** `github_owner`, `github_allowed_users` and `github_codeowners` reach the deployer through user data, which only runs on first boot, so `terraform apply` with a new value **replaces the instance** (and, until backups exist, its database: see "Replacing the instance" below). To change one without that, edit `/etc/slipway/deployer.env` on the instance (`GITHUB_OWNER`, `GITHUB_ALLOWED_USERS` as a comma-separated list, `GITHUB_CODEOWNERS`), run `sudo pm2 startOrReload /opt/slipway/current/ecosystem.config.cjs --only deployer --update-env && sudo pm2 save`, and put the same value in `terraform.tfvars` only when you next replace the instance on purpose.
-
-## 4. Clerk applications (rollout step 2)
-
-Sign-in for every app is Clerk's. In your Clerk account, create these applications (design 5.4, "Clerk setup"). The names are up to you; the ones below match the secret names. Each starts with a development instance, which is fine until you add custom domains.
-
-| Application | Secret | Used by |
-|---|---|---|
-| `slipway-stage` | `slipway/clerk/stage` | every app's staging |
-| `slipway-production` | `slipway/clerk/production` | every app's prod |
-| `slipway-local` (optional) | `slipway/clerk/local` | only `GET /api/dev-config`, which the current plugin doesn't use (apps aren't run locally) |
-
-Each secret has the same shape: `{"publishableKey": "pk_test_...", "secretKey": "sk_test_..."}`. The deploy script and the app module map each environment to its Clerk name.
-
-For each application:
-
-- **Sign-in options:** for example Google and email.
-- **Who may sign in** is decided in Clerk, not by slipway. Use **Restrictions → Allowlist** with your own email domain or a list of addresses (check that your Clerk plan includes it), or leave sign-up open for public apps.
-- **Sign-up:** open, so anyone allowed can use any app immediately.
-- **Sessions → Customize session token:** add the claims below. The template's `requireUser` copies them into each app's own `users` table; without them, `email` and `name` stay empty.
-  ```json
-  { "email": "{{user.primary_email_address}}", "name": "{{user.full_name}}" }
-  ```
-
-Then store the keys (they aren't in Terraform). The simplest way is the AWS console in your region: **Secrets Manager → Store a new secret → Other type of secret → Key/value**, with two rows, `publishableKey` and `secretKey`, named `slipway/clerk/stage` and `slipway/clerk/production` (and `slipway/clerk/local` if you made it). Or with the CLI, using `read -rs` so secret keys don't land in your shell history:
-
-```sh
-for name in stage production; do      # add local if you created it
-  read -r -p "slipway-$name publishable key: " PK
-  read -rs -p "slipway-$name secret key: " SK; echo
-  # [AWS] creates the Clerk secret for this application
-  aws secretsmanager create-secret --name "slipway/clerk/$name" --tags Key=platform,Value=slipway \
-    --secret-string "$(jq -n --arg pk "$PK" --arg sk "$SK" '{publishableKey: $pk, secretKey: $sk}')"
-done
-unset PK SK
-```
-
-To change a value later, edit the secret (console, or `aws secretsmanager put-secret-value`), then redeploy the affected environments.
-
-If you do create the local application, its secret key reaches laptops through `GET /api/dev-config` (design 5.1). Staging and prod secret keys never leave AWS.
-
-## 5. Your GitHub App
-
-GitHub App names are unique across GitHub, so pick your own, for example `slipway-<owner>`. The deployer asks GitHub for its App's name, so nothing else needs to know it.
-
-Create it under the owner you set as `github_owner`:
-
-- **Org:** **GitHub → your org → Settings → Developer settings → GitHub Apps → New GitHub App**.
-- **Personal account:** **GitHub → your profile picture → Settings → Developer settings → GitHub Apps → New GitHub App**.
-
-| Setting | Value |
-|---|---|
-| Name | yours, e.g. `slipway-<owner>` |
-| Homepage URL | the deployer URL |
-| Webhook URL | `<deployer URL>/webhooks/github` (`terraform -chdir=foundation output github_webhook_url`) |
-| Webhook secret | `openssl rand -hex 32`; keep it for the next step |
-| Repository permissions | Administration: read and write · Commit statuses: read and write · Contents: read and write · Metadata: read-only · Pull requests: read and write |
-| Organization permissions | Members: read-only (orgs only; a personal account has none to set) |
-| Subscribe to events | Push · Pull request |
-| Where can this app be installed? | Only on this account |
-
-Then:
-
-1. **Generate a private key** (downloads a `.pem`).
-2. **Install App → your org or account → All repositories.** It must be installed on all repositories so every new app repo is covered without extra steps. That's also why the owner should hold only slipway apps.
-3. Store the App ID, private key and webhook secret, then delete the `.pem`:
-
-```sh
-read -rs WEBHOOK_SECRET && export WEBHOOK_SECRET
-# [AWS] creates the GitHub App secret
-aws secretsmanager create-secret --name slipway/github-app --tags Key=platform,Value=slipway \
-  --secret-string "$(
-  jq -n --arg appId '<App ID>' --rawfile privateKey ./<app-name>.*.private-key.pem \
-        --arg webhookSecret "$WEBHOOK_SECRET" \
-        '{appId: $appId, privateKey: $privateKey, webhookSecret: $webhookSecret}')"
-unset WEBHOOK_SECRET
-rm ./<app-name>.*.private-key.pem
-```
-
-GitHub will show failed webhook deliveries until the deployer is running (step 6). That's fine: the deployer catches up on startup.
-
-## 6. Release the platform
-
-One release carries everything that runs on the instance: the deployer, the runner, the job scripts (`jobs/`) and the per-app modules (`modules/`), plus `ecosystem.config.cjs` and the `Caddyfile` (contracts.md, "Deployer host"). `release.sh` needs `AWS_REGION` (from step 0) and shows the account and region before it asks for `yes`.
-
-```sh
-# [AWS] uploads s3://slipway-artifacts-<account>/deployer/<version>.tgz, creates or
-# updates /slipway/deployer/version, and runs /opt/slipway/bin/update-deployer.sh
-# on the instance through SSM
-deployer/scripts/release.sh <version>
-```
-
-On the instance, `update-deployer.sh`:
-
-1. downloads the release and runs `npm ci --omit=dev` in `deployer/` and `jobs/`;
-2. installs the Terraform and gitleaks versions pinned in the release's `jobs/versions.env` into `/usr/local/bin` (a release can bring its own `jobs/install-tools.sh` instead);
-3. installs the release's `Caddyfile` (validated with the origin secret loaded);
-4. points `/opt/slipway/current` at the release, reloads Caddy, and runs `pm2 startOrReload ecosystem.config.cjs` and `pm2 save`.
-
-It keeps the last three releases. Before the first release, `/slipway/deployer/version` doesn't exist and the script installs nothing. If you ever need to run it by hand:
-
-```sh
-# [AWS] runs the update script on the deployer instance
-aws ssm send-command --document-name AWS-RunShellScript \
-  --instance-ids "$(terraform -chdir=foundation output -raw deployer_instance_id)" \
-  --parameters 'commands=["/opt/slipway/bin/update-deployer.sh"]' \
-  --query 'Command.CommandId' --output text
-```
-
-Releasing restarts the runner, which waits for running builds and deploys to finish first (up to 14 minutes) and fails any that don't. Check the dashboard is idle before releasing. A deploy killed mid-Terraform can leave a state lock (`apps/<app>/<env>.tfstate.tflock` in the state bucket) that the next deploy of that environment trips over; delete the lock file once you're sure nothing is running.
-
-## 7. Create the first admin
-
-```sh
-# [AWS] opens a shell on the deployer through Session Manager (no SSH)
-aws ssm start-session --target "$(terraform -chdir=foundation output -raw deployer_instance_id)"
-```
-
-On the instance:
-
-```sh
-sudo /opt/slipway/bin/create-admin --email <your email> --name "Your Name"   # prints a temporary password
-```
-
-The wrapper runs the current release's `deployer/dist/scripts/create-admin.js` as the `slipway` user with the deployer's environment. Sign in at the deployer URL; you'll be asked to change the password. Create everyone else's accounts from the dashboard's Users page. Dashboard accounts are separate from GitHub: they're for people who promote to prod, confirm teardowns and watch jobs.
-
-## 8. Check it end to end
+### Checking it end to end
 
 From your machine:
 
@@ -290,21 +136,15 @@ sudo ls /var/lib/slipway                     # works as root ...
 sudo -u slipway-build ls /var/lib/slipway   # ... and is denied for the build user
 ```
 
-## 9. Connect the plugin
+### Tearing it down
 
-Nobody needs to fork the plugin. Each colleague needs Claude Code, Node.js 24 and the GitHub CLI signed in (`gh auth login`) as a member of the org, or as you or an allowed user on a personal account. Then, in Claude Code:
+There's no command for this; it deletes everything, so it's deliberately manual.
 
-```
-/plugin marketplace add sameid/slipway
-/plugin install slipway@slipway
-/setup https://dxxxx.cloudfront.net
-```
-
-`/setup` takes the `deployer_url` output, runs `slipway setup --deployer-url <url>`, saves it in `~/.config/slipway/config.json` (or `$XDG_CONFIG_HOME/slipway/config.json`), and checks it: it prints who you're signed in as and the account new apps are created under. `SLIPWAY_DEPLOYER_URL` overrides the saved URL.
-
-A team that would rather not have everyone run `/setup` can fork the repo, set `deployerUrl` in `plugin/slipway.config.json`, and add their fork as the marketplace instead. The saved URL and `SLIPWAY_DEPLOYER_URL` still win over it.
-
-Then go on to rollout step 3: `/new-app`, one app by hand, and signing in on staging and prod.
+1. Destroy every app with `/destroy-app` and confirm each on the dashboard. Prod databases leave a final snapshot; delete those in the RDS console when you're sure.
+2. Empty the artifacts bucket (`slipway-artifacts-<account>`), then `terraform -chdir="$TF" destroy` with the inputs, as above.
+3. Delete the secret `slipway/github-app` (`aws secretsmanager delete-secret --secret-id slipway/github-app --force-delete-without-recovery`), and the SSM parameter `/slipway/deployer/version`.
+4. Delete the GitHub App: **Settings → Developer settings → GitHub Apps → your App → Advanced → Delete**.
+5. Empty and delete the state bucket, including old versions. Remove `deployerUrl` and `setup` from `~/.config/slipway/config.json`.
 
 ## Operating the deployer host
 
@@ -326,7 +166,7 @@ Then go on to rollout step 3: `/new-app`, one app by hand, and signing in on sta
 
 **Caddy.** `systemctl status caddy`, `journalctl -u caddy`. `sudo systemctl reload caddy` after editing `/etc/caddy/Caddyfile` by hand (the next release overwrites it). Caddy refuses to start if `/etc/slipway/caddy.env` has no origin secret. Its admin API listens on `localhost:2019`; the firewall keeps the build user and containers away from it.
 
-**The runner.** Each run has a directory in `/var/lib/slipway-runner/runs/<id>/` with its `log`, so `sudo tail -f /var/lib/slipway-runner/runs/<id>/log` follows a build. At most `RUNNER_MAX_BUILDS` builds (default 1) and `RUNNER_MAX_DEPLOYS` deploys (default 2) run at once; change them in `terraform.tfvars` (`runner_max_builds`, `runner_max_deploys`; that replaces the instance) or in `/etc/slipway/runner.env` followed by `sudo pm2 startOrReload /opt/slipway/current/ecosystem.config.cjs --only runner --update-env && sudo pm2 save` (pm2 re-reads the env files only through the ecosystem file). The instance has 2 GB of memory and a 4 GB swap file; raise the builds limit only on a bigger instance.
+**The runner.** Each run has a directory in `/var/lib/slipway-runner/runs/<id>/` with its `log`, so `sudo tail -f /var/lib/slipway-runner/runs/<id>/log` follows a build. At most `RUNNER_MAX_BUILDS` builds (default 1) and `RUNNER_MAX_DEPLOYS` deploys (default 2) run at once; change them as foundation inputs (`runner_max_builds`, `runner_max_deploys`, by hand: see "Doing it by hand"; that replaces the instance) or in `/etc/slipway/runner.env` followed by `sudo pm2 startOrReload /opt/slipway/current/ecosystem.config.cjs --only runner --update-env && sudo pm2 save` (pm2 re-reads the env files only through the ecosystem file). The instance has 2 GB of memory and a 4 GB swap file; raise the builds limit only on a bigger instance.
 
 **Permissions, isolation, and what changed from design 7.** The instance role (`slipway-deployer`) is used directly by the deployer and the runner. It may do anything in the foundation's region, which is dedicated to slipway. Outside the region it can only:
 
@@ -355,12 +195,14 @@ Design 7 said "the deployer, the most exposed component, holds the least AWS pow
 
 ```sh
 # [AWS] replaces the deployer (its database is NOT kept until EBS backups exist)
-terraform -chdir=foundation apply -replace=aws_instance.deployer
+terraform -chdir="$TF" apply -replace=aws_instance.deployer    # $TF: see "Doing it by hand"
 ```
+
+Then run `/setup` again: it waits for the new instance's first boot and creates your dashboard account again.
 
 The network interface, Elastic IP and CloudFront distribution stay as they are.
 
-**Updating tools.** Node.js, pm2, pm2-logrotate and Caddy are pinned in `foundation/variables.tf` (`node_version`/`node_sha256`, `pm2_version`, `pm2_logrotate_version`, `caddy_version`/`caddy_sha512`; checksums from `SHASUMS256.txt` on nodejs.org and the Caddy GitHub release). Change them in `terraform.tfvars`, then replace the instance as above. Terraform and gitleaks are pinned in `jobs/versions.env` and arrive with the next release, without replacing anything.
+**Updating tools.** Node.js, pm2, pm2-logrotate and Caddy are pinned in `foundation/variables.tf` (`node_version`/`node_sha256`, `pm2_version`, `pm2_logrotate_version`, `caddy_version`/`caddy_sha512`; checksums from `SHASUMS256.txt` on nodejs.org and the Caddy GitHub release). Change them as foundation inputs (by hand, as below), then replace the instance as above. Terraform and gitleaks are pinned in `jobs/versions.env` and arrive with the next release, without replacing anything.
 
 ## Known limits and things to check
 
@@ -370,4 +212,3 @@ The network interface, Elastic IP and CloudFront distribution stay as they are.
 - **IAM outside the region.** Terraform may need an IAM or CloudFront action not listed. Add the exact action, scoped to `app-*` or the tag conditions, rather than widening.
 - **Origin access controls** can't be tagged, so the role may create and delete any of them (deleting one in use fails). It can't update them.
 - **Memory.** A `t3.small` builds one app at a time next to the deployer, with swap as the safety net. If builds get slow or the instance swaps hard, move to a `t3.medium`.
-- **Clerk allowlist** availability on your Clerk plan.

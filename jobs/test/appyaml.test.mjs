@@ -25,7 +25,6 @@ secrets:
   - OPENAI_API_KEY
 
 # Platform-owned (dev team approval required to change)
-auth: clerk
 auto_merge: true
 sizes:
   staging: small
@@ -78,7 +77,7 @@ extra: 1
   for (const expected of [
     /name must be/, /api.port/, /health_check must be a path under \/api\//, /migrate_command/,
     /output_dir must be inside the repo/, /"stripe_key" must be UPPER_SNAKE_CASE/, /PORT is reserved/,
-    /AWS_SECRET_ACCESS_KEY is reserved/, /OK_KEY is listed twice/, /auth must be "clerk"/,
+    /AWS_SECRET_ACCESS_KEY is reserved/, /OK_KEY is listed twice/, /unknown key "auth"/,
     /auto_merge must be true or false/, /sizes.staging must be one of/, /unknown key "extra"/,
   ]) {
     assert.match(all, expected);

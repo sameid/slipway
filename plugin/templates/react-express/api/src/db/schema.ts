@@ -1,12 +1,10 @@
 import { integer, pgTable, text, timestamp } from "drizzle-orm/pg-core";
 
-// Local copy of each Clerk user, created on their first request (see auth.ts).
-export const users = pgTable("users", {
+// The template's sample table (see routes/notes.ts). Replace it with the app's own.
+export const notes = pgTable("notes", {
   id: integer().primaryKey().generatedAlwaysAsIdentity(),
-  clerkId: text("clerk_id").notNull().unique(),
-  email: text(),
-  name: text(),
+  body: text().notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
-export type User = typeof users.$inferSelect;
+export type Note = typeof notes.$inferSelect;

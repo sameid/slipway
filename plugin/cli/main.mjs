@@ -1,17 +1,26 @@
 // slipway CLI: everything the plugin's commands and skills need from the deployer,
-// plus the mechanical parts of /new-app. Zero dependencies; Node 24.
+// the mechanical parts of /new-app, and /setup. Zero dependencies; Node 24.
 import { parseArgs } from "node:util";
 import { appName } from "./app.mjs";
 import { config, saveDeployerUrl } from "./config.mjs";
 import { api } from "./deployer.mjs";
 import { checkName, newApp, register, templates } from "./new-app.mjs";
 import { secret } from "./secret.mjs";
+import { setup } from "./setup.mjs";
 import { CliError, EXIT, print, printJson } from "./util.mjs";
 import { jobs, log, status, waitApp, waitPr } from "./watch.mjs";
 
 const HELP = `slipway: the slipway plugin's CLI
 
 Usage: slipway <command> [options]
+
+Set up
+  setup --region <region> --email <email> [--owner <org-or-login>] [--profile <aws-profile>] [--yes]
+                          put slipway in your AWS account, with apps under your GitHub org or account.
+                          Without --yes it only checks and shows what it would do. Run it again to update.
+        [--budget <usd>] [--allowed-users a,b] [--codeowners @org/team] [--allow-replace] [--release] [--no-browser]
+  connect <deployer-url>  use a deployer someone else set up (saved in ~/.config/slipway/config.json)
+  whoami                  your GitHub login and the account that owns app repos
 
 Apps
   new-app --name <name> --description <text> [--template react-express] [--dir <parent>] [--local-only]
@@ -34,10 +43,6 @@ Secrets (values are only ever typed into a browser page)
   secret link <KEY> --env staging|prod [--open]  one-time link only
   secret wait <link-id>
 
-Other
-  setup --deployer-url <url>        save your deployer's URL (in ~/.config/slipway/config.json)
-  whoami                  your GitHub login and the account that owns app repos
-
 Options
   --app <name>            app to act on (default: name in app.yaml at the git root)
   --json                  machine-readable output
@@ -47,8 +52,8 @@ Options
 Exit codes: 0 done, 1 error, 2 usage, 3 failed, 4 blocked (PR won't auto-merge),
 10 still waiting (run the same command again).
 
-Config: SLIPWAY_DEPLOYER_URL, else slipway setup's config file, else deployerUrl in the plugin's
-slipway.config.json; SLIPWAY_GH_TOKEN or gh auth token.`;
+Config: SLIPWAY_DEPLOYER_URL, else the config file setup and connect write, else deployerUrl in the
+plugin's slipway.config.json; SLIPWAY_GH_TOKEN or gh auth token.`;
 
 const OPTIONS = {
   app: { type: "string" },
@@ -69,6 +74,16 @@ const OPTIONS = {
   env: { type: "string" },
   open: { type: "boolean" },
   yes: { type: "boolean" },
+  region: { type: "string" },
+  profile: { type: "string" },
+  owner: { type: "string" },
+  email: { type: "string" },
+  budget: { type: "string" },
+  "allowed-users": { type: "string" },
+  codeowners: { type: "string" },
+  "allow-replace": { type: "boolean" },
+  release: { type: "boolean" },
+  "no-browser": { type: "boolean" },
 };
 
 const COMMANDS = {
@@ -83,7 +98,8 @@ const COMMANDS = {
   log,
   secret,
   destroy,
-  setup,
+  setup: (opts) => setup({ ...opts, browser: !opts["no-browser"] }),
+  connect,
   whoami,
 };
 
@@ -93,14 +109,15 @@ async function whoami(opts) {
   print(`${me.login} on ${config().deployerUrl} (apps are created under ${me.owner})`);
 }
 
-// Save the URL first, so a sign-in problem doesn't lose it; then check it works.
-async function setup(opts, [positional] = []) {
+// Use a deployer someone else set up. Save the URL first, so a sign-in problem doesn't
+// lose it; then check it works.
+async function connect(opts, [positional] = []) {
   const raw = (opts["deployer-url"] ?? positional ?? "").trim();
   let url;
   try {
     url = new URL(raw);
   } catch {
-    throw new CliError("Give the deployer's URL: slipway setup --deployer-url https://dxxxx.cloudfront.net", EXIT.USAGE);
+    throw new CliError("Give the deployer's URL: slipway connect https://dxxxx.cloudfront.net", EXIT.USAGE);
   }
   const local = ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
   if (url.protocol !== "https:" && !(local && url.protocol === "http:")) {

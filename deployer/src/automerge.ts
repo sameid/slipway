@@ -17,7 +17,7 @@ export async function decideMerge(deps: Deps, app: AppRow, pull: PullInfo, check
   if (pull.state !== "open") return { action: "skip", reason: "PR is no longer open" };
   if (pull.headSha !== checkedSha) return { action: "skip", reason: "PR has newer commits" };
   if (!app.autoMerge) {
-    return { action: "block", note: "Auto-merge is off for this app; the dev team merges its PRs" };
+    return { action: "block", note: "Auto-merge is off for this app; a person merges its PRs" };
   }
   if (pull.draft) return { action: "block", note: "Draft PR: mark it ready for review to merge it" };
 
@@ -26,7 +26,7 @@ export async function decideMerge(deps: Deps, app: AppRow, pull: PullInfo, check
   if (protectedFiles.length) {
     return {
       action: "block",
-      note: `Changes platform-owned files (${protectedFiles.join(", ")}); needs dev team review`,
+      note: `Changes platform-owned files (${protectedFiles.join(", ")}); needs a review from CODEOWNERS`,
     };
   }
   if (files.includes("app.yaml")) {
@@ -38,7 +38,7 @@ export async function decideMerge(deps: Deps, app: AppRow, pull: PullInfo, check
     if (changed.length) {
       return {
         action: "block",
-        note: `Changes platform-owned app.yaml fields (${changed.join(", ")}); needs dev team review`,
+        note: `Changes platform-owned app.yaml fields (${changed.join(", ")}); needs a review from CODEOWNERS`,
       };
     }
   }

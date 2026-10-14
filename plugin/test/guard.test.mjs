@@ -25,7 +25,7 @@ describe("file edits in an app repo", () => {
   test("blocks .github/, even in folders that don't exist yet", async () => {
     const r = await runGuard({ tool_name: "Write", cwd: repo, tool_input: { file_path: path.join(repo, ".github/workflows/ci.yml"), content: "x" } });
     assert.equal(r.code, 2);
-    assert.match(r.stderr, /\.github\/ is owned by the dev team/);
+    assert.match(r.stderr, /\.github\/ is platform-owned/);
   });
 
   test("blocks CODEOWNERS, with relative paths too", async () => {
@@ -41,7 +41,7 @@ describe("file edits in an app repo", () => {
   test("allows app.yaml edits to non-platform fields", async () => {
     assert.equal((await runGuard(edit(appYaml, "secrets: []", "secrets:\n  - STRIPE_KEY"))).code, 0);
     assert.equal((await runGuard(edit(appYaml, 'description: "Tracks loans"', 'description: "Tracks equipment loans"'))).code, 0);
-    assert.equal((await runGuard(edit(appYaml, "# Platform-owned (dev team approval required to change)", "# Platform-owned"))).code, 0);
+    assert.equal((await runGuard(edit(appYaml, "# Platform-owned (changes need a review from CODEOWNERS)", "# Platform-owned"))).code, 0);
   });
 
   test("blocks app.yaml edits to platform-owned fields", async () => {
@@ -50,7 +50,7 @@ describe("file edits in an app repo", () => {
     assert.match(sizes.stderr, /changes sizes in app\.yaml/);
     assert.equal((await runGuard(edit(appYaml, "auto_merge: true", "auto_merge: false"))).code, 2);
     assert.equal((await runGuard(edit(appYaml, "name: loan-tracker", "name: loans"))).code, 2);
-    assert.equal((await runGuard(edit(appYaml, "auth: clerk\n", ""))).code, 2);
+    assert.equal((await runGuard(edit(appYaml, "auto_merge: true\n", ""))).code, 2);
   });
 
   test("Write and MultiEdit are checked on the resulting file", async () => {
@@ -65,7 +65,7 @@ describe("file edits in an app repo", () => {
         file_path: appYaml,
         edits: [
           { old_string: "Tracks loans", new_string: "Tracks gear" },
-          { old_string: "auth: clerk", new_string: "auth: none" },
+          { old_string: "auto_merge: true", new_string: "auto_merge: false" },
         ],
       },
     };
@@ -136,8 +136,8 @@ describe("outside app repos and on bad input", () => {
 });
 
 test("changedPlatformFields ignores comments and formatting", () => {
-  const before = "name: a\nauth: clerk # owner: platform\nsizes:\n  staging: small\n  prod: small\n";
-  assert.deepEqual(changedPlatformFields(before, "name: a\nauth: clerk\n\nsizes:\n  staging: small   # cheap\n  prod: small\n"), []);
-  assert.deepEqual(changedPlatformFields(before, "name: a\nauth: clerk\nsizes:\n  staging: small\n  prod: medium\n"), ["sizes"]);
-  assert.deepEqual(changedPlatformFields(before, 'name: b\nauth: "clerk # not a comment"\nsizes:\n  staging: small\n  prod: small\n'), ["name", "auth"]);
+  const before = "name: a\nauto_merge: true # owner: platform\nsizes:\n  staging: small\n  prod: small\n";
+  assert.deepEqual(changedPlatformFields(before, "name: a\nauto_merge: true\n\nsizes:\n  staging: small   # cheap\n  prod: small\n"), []);
+  assert.deepEqual(changedPlatformFields(before, "name: a\nauto_merge: true\nsizes:\n  staging: small\n  prod: medium\n"), ["sizes"]);
+  assert.deepEqual(changedPlatformFields(before, 'name: b\nauto_merge: "true # not a comment"\nsizes:\n  staging: small\n  prod: small\n'), ["name", "auto_merge"]);
 });

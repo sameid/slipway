@@ -4,7 +4,7 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import express from "express";
 import { parse } from "yaml";
-import type { DevConfig, Platform } from "./aws.js";
+import type { Platform } from "./aws.js";
 import { ProtectionUnavailable, type CommitStatus, type GitHub, type MergeResult, type OwnerType, type PullInfo } from "./github.js";
 import type { RunInfo, Runs, StartRunInput } from "./runs.js";
 
@@ -40,7 +40,6 @@ export function defaultAppYaml(name: string): string {
     "  output_dir: web/dist",
     "secrets:",
     "  - EXAMPLE_API_KEY",
-    "auth: clerk",
     "auto_merge: true",
     "sizes:",
     "  staging: small",
@@ -440,13 +439,6 @@ export class FakePlatform implements Platform {
 
   async putAppSecret(name: string, _value: string): Promise<void> {
     this.written.push(name);
-  }
-
-  async devConfig(): Promise<DevConfig> {
-    return {
-      publishableKey: process.env.FAKE_CLERK_PUBLISHABLE_KEY ?? "pk_test_fake",
-      secretKey: process.env.FAKE_CLERK_SECRET_KEY ?? "sk_test_fake",
-    };
   }
 }
 

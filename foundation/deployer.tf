@@ -31,19 +31,17 @@ locals {
   # /etc/slipway/deployer.env and /etc/slipway/runner.env
   # (docs/contracts.md, "Deployer host").
   deployer_env = {
-    NODE_ENV              = "production"
-    HOST                  = "127.0.0.1"
-    PORT                  = local.deployer_port
-    AWS_REGION            = local.region
-    DATA_DIR              = "/var/lib/slipway"
-    GITHUB_OWNER          = var.github_owner
-    GITHUB_ALLOWED_USERS  = join(",", var.github_allowed_users)
-    GITHUB_CODEOWNERS     = var.github_codeowners
-    PUBLIC_URL            = "https://${aws_cloudfront_distribution.deployer.domain_name}"
-    RUNNER_SOCKET         = "/run/slipway/runner.sock"
-    GITHUB_APP_SECRET_ID  = "slipway/github-app"
-    CLERK_LOCAL_SECRET_ID = "slipway/clerk/local"
-    ALERTS_TOPIC_ARN      = aws_sns_topic.alerts.arn
+    NODE_ENV             = "production"
+    HOST                 = "127.0.0.1"
+    PORT                 = local.deployer_port
+    AWS_REGION           = local.region
+    DATA_DIR             = "/var/lib/slipway"
+    GITHUB_OWNER         = var.github_owner
+    GITHUB_ACCESS_PARAM  = aws_ssm_parameter.github_access.name
+    PUBLIC_URL           = "https://${aws_cloudfront_distribution.deployer.domain_name}"
+    RUNNER_SOCKET        = "/run/slipway/runner.sock"
+    GITHUB_APP_SECRET_ID = "slipway/github-app"
+    ALERTS_TOPIC_ARN     = aws_sns_topic.alerts.arn
   }
 
   runner_env = {
@@ -85,6 +83,19 @@ locals {
 
 # Sent by CloudFront on every request to the instance; Caddy rejects requests
 # without it (docs/contracts.md, "Deployer host").
+# Who else may use the deployer (personal accounts) and the CODEOWNERS entry for
+# new apps. The deployer reads this at startup. It's a parameter rather than
+# user data so that changing it restarts the deployer (slipway setup does that)
+# instead of replacing the instance.
+resource "aws_ssm_parameter" "github_access" {
+  name = "/slipway/deployer/github-access"
+  type = "String"
+  value = jsonencode({
+    allowedUsers = var.github_allowed_users
+    codeowners   = var.github_codeowners
+  })
+}
+
 resource "random_password" "origin" {
   length  = 48
   special = false

@@ -62,11 +62,6 @@ output "env" {
   value = var.env
 }
 
-# For config.json (public: it ships to every browser).
-output "clerk_publishable_key" {
-  value = var.clerk_publishable_key
-}
-
 # The app.yaml-derived inputs, JSON-encoded. Teardown re-applies with exactly
 # these, so lifting deletion protection never also resizes the database.
 output "inputs" {

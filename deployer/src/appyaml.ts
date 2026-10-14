@@ -3,7 +3,7 @@ import { parse } from "yaml";
 import { SECRET_KEY } from "./names.js";
 
 /** Fields only the dev team may change. */
-export const PLATFORM_FIELDS = ["name", "auth", "auto_merge", "sizes"] as const;
+export const PLATFORM_FIELDS = ["name", "auto_merge", "sizes"] as const;
 
 export type AppYaml = {
   name: string | null;

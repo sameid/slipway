@@ -1,6 +1,6 @@
 ---
 name: slipway-stack
-description: House conventions for slipway apps (React + TanStack Query + HeroUI + Tailwind, Express + Drizzle + Postgres, Clerk sign-in). Use whenever you write or change code in a repo with an app.yaml that has a template key, including API routes, database schema and migrations, frontend data fetching, auth, tests and third-party keys.
+description: House conventions for slipway apps (React + TanStack Query + HeroUI + Tailwind, Express + Drizzle + Postgres, no sign-in by default). Use whenever you write or change code in a repo with an app.yaml that has a template key, including API routes, database schema and migrations, frontend data fetching, auth, tests and third-party keys.
 ---
 
 # slipway stack conventions
@@ -9,17 +9,17 @@ These apps run on the slipway platform. Every merge to `main` deploys to staging
 
 ## Shape of an app
 
-- `api/`: Express 5, Drizzle ORM on Postgres (`node-postgres`), `@clerk/express`. `web/`: React, TanStack Query, HeroUI v3 (`@heroui/react`), Tailwind, Vite, `@clerk/react`. npm workspaces with one root `package-lock.json`.
-- `app.yaml` is the manifest. You may edit `description`, `api`, `web` and `secrets`. `name`, `auth`, `auto_merge` and `sizes` are platform-owned: the plugin's hooks block changes, and the deployer won't auto-merge them. `.github/` and `CODEOWNERS` are off limits too. If one of these really has to change, stop and tell the colleague to ask the dev team.
+- `api/`: Express 5, Drizzle ORM on Postgres (`node-postgres`). `web/`: React, TanStack Query, HeroUI v3 (`@heroui/react`), Tailwind, Vite. npm workspaces with one root `package-lock.json`.
+- New apps have no sign-in: every page and `/api` route is public to anyone with the link. The template's `notes` table and routes are a sample to replace.
+- `app.yaml` is the manifest. You may edit `description`, `api`, `web` and `secrets`. `name`, `auto_merge` and `sizes` are platform-owned: the plugin's hooks block changes, and the deployer won't auto-merge them. `.github/` and `CODEOWNERS` are off limits too. If one of these really has to change, stop and tell the user: someone in the app's CODEOWNERS changes it by hand.
 - No Terraform, CI workflows, Dockerfiles for other services or deploy scripts in the app repo. `api/Dockerfile` exists for the platform's build; leave its base image, user and the RDS CA bundle alone.
 
 ## API
 
-- Every route lives under `/api` in a router in `api/src/routes/`, mounted in `api/src/app.ts` after `clerkMiddleware()`.
-- Every route except `/api/health` uses `requireUser`, which returns 401 JSON when signed out and sets `req.user` to the local `users` row. A public route is a deliberate, commented decision.
-- Reference `req.user.id` in app tables, never the Clerk user id directly.
-- Being signed in only proves the user is a colleague: any colleague can sign in to any app. Do authorization in the app's own tables (owner columns, roles).
-- Return JSON errors (`{ "error": "..." }`) with proper status codes. Don't use Clerk's `requireAuth()` (it redirects) and don't call Clerk's Backend API per request (the rate limit is shared by every app).
+- Every route lives under `/api` in a router in `api/src/routes/`, mounted in `api/src/app.ts`.
+- Without sign-in, treat every route as public. Don't store or return personal data, internal documents or anything per-user until the app has authentication.
+- Sign-in is the user's choice (provider, who may sign in). If a feature needs to know who the user is and the app has no auth yet, stop and ask; don't hand-roll a login. Once an app has auth, do authorization in its own tables (owner columns, roles): being signed in isn't permission. A provider's secret key goes under `secrets:` like any other key; a publishable key can reach the frontend through an API route.
+- Return JSON errors (`{ "error": "..." }`) with proper status codes; an auth check returns 401 JSON rather than redirecting.
 - Validate request bodies at the route boundary.
 - `/api/health` stays public, returns 200 only when the database is reachable, and keeps its `{ ok, release, migrations }` shape.
 - Don't change how `api/src/db/client.ts` reads database credentials: it fetches the rotating RDS password from Secrets Manager in staging and prod.
@@ -33,11 +33,10 @@ These apps run on the slipway platform. Every merge to `main` deploys to staging
 
 ## Frontend
 
-- All server state goes through TanStack Query hooks in `web/src/api.ts` built on `useApi()`, which adds the Clerk session token as `Authorization: Bearer`. No `fetch` in components.
-- Only relative `/api/...` URLs. The same build runs locally, on staging and on prod; per-environment settings come from `/config.json` at runtime.
-- HeroUI v3 components (`@heroui/react`) for the UI, Tailwind utilities for layout and spacing, and HeroUI's theme colours (`bg-background`, `text-muted`, `text-danger`, ...) instead of fixed palette colours. No other component library. Apps created before the template had HeroUI don't have `@heroui/react` in `web/package.json`; keep to plain Tailwind there unless the colleague asks to adopt it.
+- All server state goes through TanStack Query hooks in `web/src/api.ts` built on `useApi()`. No `fetch` in components.
+- Only relative `/api/...` URLs. The same build runs on staging and on prod; the environment and release come from `/config.json` at runtime.
+- HeroUI v3 components (`@heroui/react`) for the UI, Tailwind utilities for layout and spacing, and HeroUI's theme colours (`bg-background`, `text-muted`, `text-danger`, ...) instead of fixed palette colours. No other component library. Apps created before the template had HeroUI don't have `@heroui/react` in `web/package.json`; keep to plain Tailwind there unless the user asks to adopt it.
 - HeroUI v3 is not v2 (NextUI): compound parts (`Card.Header`, `Alert.Content`), no provider, React Aria props (`onPress`, `isDisabled`), and `variant` instead of `color`. Check https://heroui.com/react/llms.txt rather than relying on v2 examples.
-- Clerk's `<SignIn />` and `<UserButton />` for auth UI.
 
 ## Tests and checks
 
@@ -48,9 +47,9 @@ These apps run on the slipway platform. Every merge to `main` deploys to staging
 
 - Read them from `process.env` in the API only, never in the frontend.
 - Declare the name under `secrets:` in `app.yaml`, and give it a fake value in tests (`vi.stubEnv`).
-- The colleague sets staging and prod values with `/secret set <KEY> --env staging|prod`, which opens a one-time browser link. Never ask for, accept or write a secret value in the conversation, code, commits or `app.yaml`. If a colleague pastes one, don't use it; tell them to rotate it.
+- The user sets staging and prod values with `/secret set <KEY> --env staging|prod`, which opens a one-time browser link. Never ask for, accept or write a secret value in the conversation, code, commits or `app.yaml`. If a user pastes one, don't use it; tell them to rotate it.
 
 ## No local running
 
-- Apps don't run on the laptop: there's no local database, dev server or `.env`. Check work with tests, typecheck and lint, and the colleague previews it on staging after `/ship` merges it.
+- Apps don't run on the laptop: there's no local database, dev server or `.env`. Check work with tests, typecheck and lint, and the user previews it on staging after `/ship` merges it.
 - Work on features in a worktree (the `coding-agent` skill), and finish with `/ship`.

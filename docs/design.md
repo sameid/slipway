@@ -5,7 +5,7 @@
 **Last updated:** October 12, 2026
 **Region:** `ca-west-1` (Canada West, Calgary) for the first deployment; now any region you choose, dedicated to slipway (item 11)
 
-> This design was written for slipway's first deployment: one company's GitHub org and one AWS account in `ca-west-1`. Keep reading it for the reasoning. For the current self-hosted setup (your own GitHub org or personal account, your own AWS account and region), [foundation.md](foundation.md) and [contracts.md](contracts.md) win where they differ. Here, `acme` stands for the GitHub owner that holds app repos, and "the dev team" for whoever runs your slipway.
+> This design was written for slipway's first deployment: one company's GitHub org and one AWS account in `ca-west-1`. Keep reading it for the reasoning. For the current setup, where anyone installs the plugin and `/setup` puts slipway in their own AWS account with apps under their own GitHub org or personal account (items 11–13), [foundation.md](foundation.md) and [contracts.md](contracts.md) win where they differ. Here, `acme` stands for the GitHub owner that holds app repos, and "the dev team" for whoever runs your slipway. Apps no longer come with sign-in (item 12): wherever this document mentions Clerk, read "no sign-in until the app's developer adds authentication".
 
 ## Changes since Draft v7
 
@@ -27,8 +27,16 @@ These changes came out of building the platform and checking the region. Where t
     - **Branch protection.** Push restrictions (only the App may push to `main`) are set on org repos only; GitHub has none for personal repos. GitHub Free can't protect private repos at all: registration then succeeds with a warning and `main` stays unprotected.
     - **CODEOWNERS.** New apps get `github_codeowners`, or by default the owner (personal account) or the app's creator (org), instead of a fixed team.
     - **Region.** Required everywhere (Terraform, the deployer, the runner, `release.sh`), with no default. It must still be dedicated to slipway; a dedicated AWS account is best.
-    - **Plugin setup.** The plugin has no built-in org or deployer URL. Each colleague runs `/setup <deployer URL>` once, which saves it in `~/.config/slipway/config.json`; the plugin learns the owner and the CODEOWNERS entry from `GET /api/whoami`.
-    - **One repo.** The platform and the plugin live in one repo: infrastructure at the root, the plugin in `plugin/`, the marketplace at the root.
+    - **Plugin setup.** The plugin has no built-in org or deployer URL: it saves one in `~/.config/slipway/config.json` (`/setup` or `/connect`, item 13) and learns the owner and the CODEOWNERS entry from `GET /api/whoami`.
+    - **One repo.** The platform and the plugin live in one repo, which is also the plugin's root (item 13); the plugin's commands, skills, hooks, CLI and template are in `plugin/`.
+12. **No sign-in.** The platform no longer includes Clerk or any other auth provider: a new app is public to anyone with its link, and whether and how to add sign-in is up to its developer. Gone with it: the Clerk applications and their `slipway/clerk/*` secrets (items 5 and 10), the `auth` field in `app.yaml`, the `CLERK_*` container variables, the Clerk key in `config.json` (it now holds only `env` and `release`), the deployer's `GET /api/dev-config`, and the template's `requireUser` and `users` table (its sample is now a public notes list). A provider's secret key is an app secret like any other (`secrets:` in `app.yaml`, set with `/secret`).
+13. **A public plugin that sets itself up.** Anyone installs the plugin from the public marketplace and runs `/setup`. It puts slipway in their own AWS account, using their own AWS credentials. That's the only time the plugin uses AWS credentials; everything after goes through the deployer's API, as before. It:
+    - creates the state bucket with the AWS CLI (the Terraform bootstrap stack is gone);
+    - applies the foundation from a copy of the plugin's own `foundation/`, with its inputs stored next to its state, and stops before any plan that replaces or deletes a resource;
+    - creates the GitHub App through GitHub's manifest flow, so nobody copies keys by hand;
+    - releases the deployer at the plugin's version, and creates the first dashboard admin through SSM Run Command.
+
+    Running `/setup` again updates everything. Others who share a deployer run `/connect <url>`. Because an installed plugin only gets its own directory, the repo root is the plugin's root (marketplace source `.`), so `/setup` has `foundation/`, `deployer/`, `jobs/` and `modules/` next to it. The allowed users and the CODEOWNERS entry moved from user data to the SSM parameter `/slipway/deployer/github-access`, so changing them restarts the deployer instead of replacing the instance. [foundation.md](foundation.md) has the details.
 
 ## 1. Summary
 

@@ -5,7 +5,6 @@
 # Everything shared is found by convention at plan time, never passed in: the
 # region's default VPC and subnets, and the foundation's IAM boundary, Express
 # infrastructure role and alerts topic by their fixed names (docs/contracts.md).
-# The Clerk secret and publishable key are set by the dev team with the CLI.
 
 locals {
   name    = "app-${var.app}-${var.env}"
@@ -49,11 +48,10 @@ locals {
   }
 
   service_env = { for k, v in merge(local.db_env, {
-    PORT                  = tostring(var.api_port)
-    APP_ENV               = var.env
-    RELEASE               = var.release
-    DEPLOY_ID             = var.deploy_id
-    CLERK_PUBLISHABLE_KEY = var.clerk_publishable_key
+    PORT      = tostring(var.api_port)
+    APP_ENV   = var.env
+    RELEASE   = var.release
+    DEPLOY_ID = var.deploy_id
   }) : k => v if v != "" }
 }
 
@@ -62,7 +60,7 @@ data "aws_caller_identity" "current" {}
 data "aws_region" "current" {}
 
 # ---------------------------------------------------------------------------
-# Lookups: default VPC, Clerk keys (docs/foundation.md creates the Clerk ones)
+# Lookups: default VPC and subnets, the app's log group
 # ---------------------------------------------------------------------------
 
 data "aws_vpc" "main" {
@@ -79,19 +77,6 @@ data "aws_subnets" "default" {
     name   = "default-for-az"
     values = ["true"]
   }
-}
-
-# The environment's Clerk application (slipway-stage or slipway-production).
-# Its secret holds {"publishableKey","secretKey"}. Only the ARN is read here, so
-# the secret key never enters Terraform state: ECS injects secretKey at task
-# start with the execution role, and deploy-env passes the publishable key in
-# as a variable.
-locals {
-  clerk_name = { staging = "stage", prod = "production" }[var.env]
-}
-
-data "aws_secretsmanager_secret" "clerk" {
-  name = "slipway/clerk/${local.clerk_name}"
 }
 
 # Created by the app's shared stack (modules/app-shared).
@@ -124,7 +109,7 @@ resource "aws_vpc_security_group_ingress_rule" "task_from_vpc" {
   to_port           = var.api_port
 }
 
-# Public IP + IGW: ECR pulls, Secrets Manager, SSM, CloudWatch Logs, Clerk JWKS.
+# Public IP + IGW: ECR pulls, Secrets Manager, SSM, CloudWatch Logs, third-party APIs.
 resource "aws_vpc_security_group_egress_rule" "task_all" {
   security_group_id = aws_security_group.task.id
   cidr_ipv4         = "0.0.0.0/0"
@@ -252,12 +237,6 @@ data "aws_iam_policy_document" "execution" {
     sid       = "Logs"
     actions   = ["logs:CreateLogStream", "logs:PutLogEvents"]
     resources = ["${data.aws_cloudwatch_log_group.app.arn}:*"]
-  }
-
-  statement {
-    sid       = "ClerkSecret"
-    actions   = ["secretsmanager:GetSecretValue"]
-    resources = [data.aws_secretsmanager_secret.clerk.arn]
   }
 
   # Only this app and environment's parameters (design 5.8). They're encrypted
@@ -389,11 +368,6 @@ resource "aws_ecs_express_gateway_service" "api" {
         name  = environment.key
         value = environment.value
       }
-    }
-
-    secret {
-      name       = "CLERK_SECRET_KEY"
-      value_from = "${data.aws_secretsmanager_secret.clerk.arn}:secretKey::"
     }
 
     # Declared in app.yaml; deploy-env has already checked each one exists.

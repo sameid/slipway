@@ -28,12 +28,11 @@ const MAX_SECRETS = 50;
 const RESERVED_SECRETS = new Set([
   "PORT", "NODE_ENV", "APP_ENV", "RELEASE", "DEPLOY_ID",
   "DB_HOST", "DB_PORT", "DB_NAME", "DB_SECRET_ARN", "DB_SSL_CA", "DATABASE_URL",
-  "CLERK_PUBLISHABLE_KEY", "CLERK_SECRET_KEY",
 ]);
 const RESERVED_SECRET_PREFIXES = ["AWS_", "ECS_"];
 
 const TOP_LEVEL_KEYS = new Set([
-  "name", "template", "description", "owner", "api", "web", "secrets", "auth", "auto_merge", "sizes",
+  "name", "template", "description", "owner", "api", "web", "secrets", "auto_merge", "sizes",
 ]);
 
 const DEFAULTS = {
@@ -130,8 +129,6 @@ export function parseAppYaml(text, { app } = {}) {
   config.secrets = Array.isArray(secrets) ? secrets : [];
 
   // Platform-owned fields
-  if (doc.auth !== undefined && doc.auth !== "clerk") errors.push('auth must be "clerk"');
-  config.auth = doc.auth ?? "clerk";
   if (doc.auto_merge !== undefined && typeof doc.auto_merge !== "boolean") errors.push("auto_merge must be true or false");
   config.auto_merge = doc.auto_merge ?? true;
 
@@ -207,7 +204,7 @@ export function renderShared({ app, outDir, modulesDir, stateBucket, region, ver
 export const ENV_OUTPUTS = [
   "app_url", "service_url", "service_name", "service_image", "migrate_image", "release", "deploy_id",
   "cluster_name", "migrate_task_definition_arn", "subnet_ids", "task_security_group_id", "web_bucket",
-  "distribution_id", "log_group_name", "env", "clerk_publishable_key", "inputs",
+  "distribution_id", "log_group_name", "env", "inputs",
 ];
 
 /** Module inputs for an environment from a validated app.yaml config. */
@@ -234,7 +231,6 @@ export function renderEnv({ app, env, inputs, outDir, modulesDir, stateBucket, r
     migrate_image: { type: "string", default: "" },
     release: { type: "string", default: "" },
     deploy_id: { type: "string", default: "" },
-    clerk_publishable_key: { type: "string", default: "" },
     destroying: { type: "bool", default: false },
   };
   return {

@@ -3,12 +3,12 @@
   "owner": {
     "name": "sameid"
   },
-  "description": "The slipway plugin for Claude Code: build, ship and run internal apps.",
+  "description": "The slipway plugin for Claude Code: build and ship apps on your own AWS and GitHub accounts.",
   "plugins": [
     {
       "name": "slipway",
-      "source": "./plugin",
-      "description": "Create, ship and run slipway apps.",
+      "source": ".",
+      "description": "Set up slipway in your AWS account, then create, ship and run apps.",
       "category": "development"
     }
   ]

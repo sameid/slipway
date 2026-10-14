@@ -95,19 +95,6 @@ variable "deploy_id" {
   default = ""
 }
 
-# publishableKey from the environment's Clerk secret (slipway/clerk/stage or
-# slipway/clerk/production), read by deploy-env. Public: it ships to browsers
-# in config.json.
-variable "clerk_publishable_key" {
-  type    = string
-  default = ""
-
-  validation {
-    condition     = var.clerk_publishable_key == "" || startswith(var.clerk_publishable_key, "pk_")
-    error_message = "clerk_publishable_key must be a Clerk publishable key (pk_...)."
-  }
-}
-
 # Set by deploy-env just before terraform destroy: lifts prod's deletion
 # protection and gives its final snapshot a unique name.
 variable "destroying" {

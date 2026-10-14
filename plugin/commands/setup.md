@@ -1,19 +1,42 @@
 ---
-description: Point the slipway plugin at your deployer (once per laptop)
-argument-hint: "[deployer-url]"
-allowed-tools: Bash(slipway *), Bash(${CLAUDE_PLUGIN_ROOT}/bin/slipway *), Bash(gh auth status)
+description: Set up slipway in your own AWS account, with apps under your GitHub org or account (once; run again to update)
+argument-hint: "[region]"
+allowed-tools: Bash(aws configure list-profiles), Bash(aws sts get-caller-identity*), Bash(gh auth status), Bash(gh api user), Bash(gh api user --jq *), Bash(gh api user/orgs --jq *), Bash(git config --get user.email), Bash(terraform version*)
 ---
 
-Connect the plugin to the colleague's slipway deployer. The `slipway` CLI is on PATH while this plugin is enabled (if not, use `"${CLAUDE_PLUGIN_ROOT}/bin/slipway"`).
+Set slipway up in the user's own AWS account, with app repos under their own GitHub org or personal account. The `slipway` CLI is on PATH while this plugin is enabled (if not, use `"${CLAUDE_PLUGIN_ROOT}/bin/slipway"`). `slipway setup` does the work. It creates a state bucket, applies the foundation with Terraform, creates a GitHub App, releases the deployer and creates a dashboard account. Without `--yes` it only checks things and prints what it would do.
 
-Deployer URL from the colleague, if any: $ARGUMENTS
+Region from the user, if any: $ARGUMENTS
 
-1. If no URL was given, ask for it in one short message: it's the `deployer_url` output of the slipway foundation (it looks like `https://dxxxx.cloudfront.net`), from whoever runs their slipway. If they run it themselves, it's `terraform -chdir=foundation output -raw deployer_url` in their slipway checkout.
-2. Run `gh auth status`. If they aren't signed in, ask them to run `! gh auth login` and continue once they have.
-3. Run `slipway setup --deployer-url <url>`. It saves the URL in `~/.config/slipway/config.json` and then checks it with the deployer.
-4. Tell them what it printed: who they're signed in as, and the GitHub account new apps are created under. Then suggest `/new-app`.
+If `slipway whoami` already works and the user wants to update (after a plugin update, say), skip to step 5. `slipway setup --yes` with no other flags reuses everything it used last time.
 
-If the check fails:
-- **Can't reach the deployer:** the URL is wrong, or the deployer isn't released yet. The URL is saved anyway; run `/setup` again with the right one.
-- **403:** their GitHub account isn't allowed. In an org, they must be a member of it. On a personal account, whoever runs their slipway adds their login to the deployer's allowed users (the runbook, docs/foundation.md, covers how).
-- **401:** run `! gh auth login` and try again.
+If someone else already runs slipway for them, they don't need any of this: use `/connect <deployer url>`.
+
+1. **Say what's about to happen**, in a few lines:
+   - It takes 20–30 minutes.
+   - It costs about $20–25 a month before any apps. Each app adds a small database, a service and a CDN distribution per environment.
+   - It needs an AWS account with admin access in the AWS CLI. Ideally that's an account used only for slipway: the region they pick is slipway's alone.
+   - It needs the GitHub CLI signed in, Terraform 1.11 or later, and Node.js 24.
+2. **Gather the inputs.** Find what you can, then ask the rest in one message:
+   - **AWS profile:** `aws configure list-profiles`. If there's more than one, ask which. Then check it with `aws sts get-caller-identity --profile <name>`. If the sign-in has expired, ask them to run `! aws sso login --profile <name>`.
+   - **Region:** where slipway runs, for example `us-east-1` or `eu-west-1`. Suggest one near them, and remind them nothing else should run there.
+   - **GitHub owner:** their personal account (`gh api user --jq .login`) or an org they own (`gh api user/orgs --jq '.[].login'`). slipway's GitHub App can write to every repo of that owner, so an org or account that holds only slipway apps is best. In an org, its members can use the deployer too. On a personal account, only they can, unless they pass `--allowed-users`.
+   - **Email:** for AWS alerts and their dashboard account. Offer `git config --get user.email`.
+3. **Check:** `slipway setup --region <region> --owner <owner> --email <email> [--profile <profile>]`. Then:
+   - If it lists problems, help fix them and run it again. For a missing tool, give the install command. For a region that won't work, suggest another.
+   - Otherwise, show the user its summary: account, region, GitHub owner, email, budget and any notes. A "Free plan" note means `main` can't be protected on private repos. Mention that.
+4. **Confirm.** Ask whether to go ahead in this AWS account and region. Stop unless they clearly say yes.
+5. **Run** the same command with `--yes`, in the background (Bash `run_in_background`), because it takes longer than a foreground command may run. While it runs, read its output every minute or two and keep the user posted in a short line (state bucket, foundation, first boot, and so on). **When a line starts with `ACTION:`, tell the user immediately.** The GitHub App step needs them in the browser. It opens a page that sends them to GitHub, where they choose **Create GitHub App** and then install it on **All repositories**. If the page didn't open, give them the `http://127.0.0.1:...` link from the output.
+6. **When it finishes**, tell them:
+   - the deployer URL;
+   - their dashboard sign-in, with the temporary password if one was printed. They choose their own at first sign-in. The dashboard is where a person promotes staging to prod;
+   - to confirm the "AWS Notification - Subscription Confirmation" email, so alerts reach them.
+
+   Then suggest `/new-app`.
+
+To let someone else use a deployer on a personal account, run `slipway setup --yes --allowed-users <login,login>`. To set the `CODEOWNERS` entry new apps get, add `--codeowners @org/team`. Either one restarts the deployer.
+
+If it fails:
+- **"would replace or delete existing resources":** explain what it lists. Replacing `aws_instance.deployer` loses the deployer's database: dashboard accounts, the app registry and job history. The apps keep running. Run again with `--allow-replace` only if the user explicitly agrees.
+- **Anything else:** show the error and what it suggests. Running `slipway setup --yes` again carries on from where it stopped; finished steps are skipped.
+- **Nobody acted on the GitHub step in time:** run it again; the step starts over.

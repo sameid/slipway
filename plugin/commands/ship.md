@@ -6,7 +6,7 @@ allowed-tools: Bash(slipway *), Bash(${CLAUDE_PLUGIN_ROOT}/bin/slipway *), Bash(
 
 Ship the current task to staging. Run this from inside the task's worktree. The `slipway` CLI is on PATH while this plugin is enabled (if not, use `"${CLAUDE_PLUGIN_ROOT}/bin/slipway"`). Its exit codes: 0 done, 1 error, 3 failed, 4 blocked, 10 still waiting (run the same command again).
 
-What the colleague said about the change, if anything: $ARGUMENTS
+What the user said about the change, if anything: $ARGUMENTS
 
 1. **Check where you are.** `git rev-parse --show-toplevel` must have an `app.yaml`, and `git branch --show-current` must be a task branch, not `main`.
    - On `main` in the main checkout with uncommitted work: don't commit it to `main`. Use the `coding-agent` skill to create a worktree for the task, move the changes with `git stash` / `git stash pop`, and continue there.
@@ -25,9 +25,9 @@ What the colleague said about the change, if anything: $ARGUMENTS
    - No PR yet: `gh pr create --base main --title "<title>" --body "<what changed, why, how it was tested>"`.
    - An open PR: the push updated it. Update the title or body if the scope changed.
    - A merged or closed PR for this branch: the earlier work is done. Create a new branch name for this change (`git branch -m <new-name>`), push it and open a new PR.
-7. **Wait for check, merge and deploy:** `slipway wait-pr <number> --head $(git rev-parse HEAD)`. It prints the check, then the merge, then the staging deploy. Exit 10 means still going: run it again. Keep the colleague posted with one short line per stage.
+7. **Wait for check, merge and deploy:** `slipway wait-pr <number> --head $(git rev-parse HEAD)`. It prints the check, then the merge, then the staging deploy. Exit 10 means still going: run it again. Keep the user posted with one short line per stage.
    - **Exit 0:** staging is live with this change. Go to step 8.
    - **Exit 3, check failed:** the output shows the failed step and the end of its log. Fix the cause in this worktree, run the matching local check, commit, push (step 5), and wait again. If the same check fails three times, stop and explain what's wrong.
-   - **Exit 3 after the merge** (release build or staging deploy failed): show the step and error. The change is on `main`, so the fix is a new PR; for platform errors (Terraform, AWS, timeouts) suggest the colleague share the dashboard link with the dev team.
-   - **Exit 4, blocked:** read the note. "Conflicts with main": go back to step 4. "Changes platform-owned files": stop; the PR needs the dev team's review. Auto-merge turned off for this app: the PR waits for a person to merge it.
-8. **Done.** Print the staging link and the PR link. If you're a background agent running one of several tasks, stop here and report; the main session offers cleanup once all are done. Otherwise ask whether to remove this worktree. If yes, `cd` to the main checkout (`dirname "$(git rev-parse --path-format=absolute --git-common-dir)"`) and run `"${CLAUDE_PLUGIN_ROOT}/skills/coding-agent/scripts/clean-worktrees.sh"`.
+   - **Exit 3 after the merge** (release build or staging deploy failed): show the step and error. The change is on `main`, so the fix is a new PR; for platform errors (Terraform, AWS, timeouts) suggest the user check the job on the dashboard, or share its link with whoever runs their slipway if that's someone else.
+   - **Exit 4, blocked:** read the note. "Conflicts with main": go back to step 4. "Changes platform-owned files": stop; the PR needs a review from the app's code owners (CODEOWNERS). Auto-merge turned off for this app: the PR waits for a person to merge it.
+8. **Done.** Print the staging link and the PR link. If you're a background agent running one of several tasks, stop here and report; the main session offers cleanup once all are done. Otherwise ask whether to remove this worktree. If yes, `cd` to the main checkout (`dirname "$(git rev-parse --path-format=absolute --git-common-dir)"`) and run `"${CLAUDE_PLUGIN_ROOT}/plugin/skills/coding-agent/scripts/clean-worktrees.sh"`.

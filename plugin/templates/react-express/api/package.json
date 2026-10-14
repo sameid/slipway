@@ -12,7 +12,6 @@
   },
   "dependencies": {
     "@aws-sdk/client-secrets-manager": "^3.1149.0",
-    "@clerk/express": "^2.1.78",
     "drizzle-orm": "^0.45.4",
     "express": "^5.3.0",
     "pg": "^8.23.1"

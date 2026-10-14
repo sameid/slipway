@@ -43,7 +43,7 @@ export class PluginAuth {
   private async refusal(login: string): Promise<string> {
     const { owner } = this.deps.config;
     if ((await this.deps.github.ownerType()) === "Organization") return `${login} is not a member of ${owner}`;
-    return `${login} isn't allowed to use this deployer: ask ${owner} to add you to its allowed users`;
+    return `${login} isn't allowed to use this deployer: ask ${owner} to add you (slipway setup --allowed-users)`;
   }
 
   middleware = async (req: Request, res: Response, next: NextFunction): Promise<void> => {

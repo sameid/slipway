@@ -106,7 +106,7 @@ export async function setSecret(deps: Deps, token: string, value: string): Promi
   } catch (err) {
     deps.db.update(secretLinks).set({ usedAt: null }).where(eq(secretLinks.tokenHash, link.tokenHash)).run();
     deps.log("writing secret failed", { app: link.app, env, key: link.key, error: String(err) });
-    throw new ApiError(502, "Couldn't save the value. Try again, or ask the dev team.");
+    throw new ApiError(502, "Couldn't save the value. Try again; if it keeps failing, the deployer's log has the reason.");
   }
 
   const now = iso(deps);

@@ -1,28 +1,18 @@
-import { Show, SignIn, UserButton } from "@clerk/react";
-import { Alert, Card, Spinner } from "@heroui/react";
-import { useHealth, useMe } from "./api";
+import { useState } from "react";
+import { Alert, Button, Card, Form, Input, Label, Spinner, TextField } from "@heroui/react";
+import { useAddNote, useHealth, useNotes } from "./api";
 
-export type Config = { clerkPublishableKey: string; env: string; release: string };
+export type Config = { env: string; release: string };
 
 export function App({ config }: { config: Config }) {
   return (
     <div className="mx-auto flex min-h-screen max-w-3xl flex-col p-6">
-      <header className="mb-8 flex items-center justify-between">
+      <header className="mb-8">
         <h1 className="text-xl font-semibold">__APP_NAME__</h1>
-        <Show when="signed-in">
-          <UserButton />
-        </Show>
       </header>
 
       <main className="flex-1">
-        <Show when="signed-out">
-          <div className="flex justify-center">
-            <SignIn routing="hash" />
-          </div>
-        </Show>
-        <Show when="signed-in">
-          <Home />
-        </Show>
+        <Home />
       </main>
 
       <Footer config={config} />
@@ -30,32 +20,67 @@ export function App({ config }: { config: Config }) {
   );
 }
 
-// The app's first screen. Replace it with the real thing.
+// The app's first screen: the template's sample notes. Replace it with the real thing.
 function Home() {
-  const me = useMe();
-  if (me.isPending) return <Spinner aria-label="Loading" />;
-  if (me.isError) {
+  return (
+    <Card>
+      <Card.Header>
+        <Card.Title>Notes</Card.Title>
+        <Card.Description>Anyone with this app's link can read and add notes.</Card.Description>
+      </Card.Header>
+      <Card.Content className="flex flex-col gap-4">
+        <AddNote />
+        <NoteList />
+      </Card.Content>
+    </Card>
+  );
+}
+
+function AddNote() {
+  const [body, setBody] = useState("");
+  const addNote = useAddNote();
+  return (
+    <Form
+      className="flex items-end gap-2"
+      onSubmit={(e) => {
+        e.preventDefault();
+        if (body.trim()) addNote.mutate(body, { onSuccess: () => setBody("") });
+      }}
+    >
+      <TextField className="flex-1" value={body} onChange={setBody} maxLength={500}>
+        <Label>New note</Label>
+        <Input />
+      </TextField>
+      <Button type="submit" variant="primary" isPending={addNote.isPending}>
+        Add
+      </Button>
+    </Form>
+  );
+}
+
+function NoteList() {
+  const notes = useNotes();
+  if (notes.isPending) return <Spinner aria-label="Loading" />;
+  if (notes.isError) {
     return (
       <Alert status="danger">
         <Alert.Indicator />
         <Alert.Content>
-          <Alert.Title>Couldn't load your profile</Alert.Title>
-          <Alert.Description>{me.error.message}</Alert.Description>
+          <Alert.Title>Couldn't load notes</Alert.Title>
+          <Alert.Description>{notes.error.message}</Alert.Description>
         </Alert.Content>
       </Alert>
     );
   }
-
-  const { user } = me.data;
+  if (!notes.data.length) return <p className="text-sm text-muted">No notes yet.</p>;
   return (
-    <Card>
-      <Card.Header>
-        <Card.Title>Welcome{user.name ? `, ${user.name}` : ""}</Card.Title>
-        <Card.Description>
-          Signed in as {user.email ?? user.clerkId} (local user #{user.id}).
-        </Card.Description>
-      </Card.Header>
-    </Card>
+    <ul className="flex flex-col gap-2">
+      {notes.data.map((note) => (
+        <li key={note.id} className="text-sm">
+          {note.body}
+        </li>
+      ))}
+    </ul>
   );
 }
 

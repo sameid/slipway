@@ -5,13 +5,9 @@ import { GetParameterCommand, PutParameterCommand, SSMClient } from "@aws-sdk/cl
 import { CloudWatchClient, PutMetricDataCommand } from "@aws-sdk/client-cloudwatch";
 import { PublishCommand, SNSClient } from "@aws-sdk/client-sns";
 
-export type DevConfig = { publishableKey: string; secretKey: string };
-
 export interface Platform {
   /** Write /apps/<app>/<env>/<KEY> as a SecureString. */
   putAppSecret(name: string, value: string): Promise<void>;
-  /** Local-development Clerk keys (slipway/clerk/local). */
-  devConfig(): Promise<DevConfig>;
   /**
    * A deploy failed: count it in the slipway/FailedDeploys metric (the
    * foundation alarms on it) and, for prod, tell the dev team's SNS topic.
@@ -24,17 +20,13 @@ export const PLACEHOLDER = "unset";
 
 export class AwsPlatform implements Platform {
   private ssm: SSMClient;
-  private secrets: SecretsManagerClient;
-  private cachedDevConfig?: { value: DevConfig; until: number };
-
   private cloudwatch: CloudWatchClient;
   private sns: SNSClient;
 
   constructor(
-    private opts: { region: string; kmsKeyId?: string; clerkLocalSecretId: string; alertsTopicArn?: string },
+    private opts: { region: string; kmsKeyId?: string; alertsTopicArn?: string },
   ) {
     this.ssm = new SSMClient({ region: opts.region });
-    this.secrets = new SecretsManagerClient({ region: opts.region });
     this.cloudwatch = new CloudWatchClient({ region: opts.region });
     this.sns = new SNSClient({ region: opts.region });
   }
@@ -69,16 +61,6 @@ export class AwsPlatform implements Platform {
         Tier: "Standard",
       }),
     );
-  }
-
-  async devConfig(): Promise<DevConfig> {
-    if (this.cachedDevConfig && this.cachedDevConfig.until > Date.now()) return this.cachedDevConfig.value;
-    const value = await getSecretJson<DevConfig>(this.secrets, this.opts.clerkLocalSecretId);
-    if (!value.publishableKey || !value.secretKey) {
-      throw new Error(`${this.opts.clerkLocalSecretId} must hold {"publishableKey","secretKey"}`);
-    }
-    this.cachedDevConfig = { value, until: Date.now() + 5 * 60_000 };
-    return value;
   }
 }
 

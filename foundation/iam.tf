@@ -40,17 +40,12 @@ data "aws_iam_policy_document" "boundary" {
     ]
   }
 
-  # Execution roles: their environment's Clerk secret. Task roles: their RDS
-  # master secret (RDS names these rds!db-<uuid>). Never slipway/clerk/local
-  # or slipway/github-app.
+  # Task roles: their RDS master secret (RDS names these rds!db-<uuid>).
+  # Never slipway/github-app.
   statement {
-    sid     = "PlatformSecrets"
-    actions = ["secretsmanager:GetSecretValue"]
-    resources = [
-      "arn:${local.partition}:secretsmanager:${local.region}:${local.account_id}:secret:slipway/clerk/stage-*",
-      "arn:${local.partition}:secretsmanager:${local.region}:${local.account_id}:secret:slipway/clerk/production-*",
-      "arn:${local.partition}:secretsmanager:${local.region}:${local.account_id}:secret:rds!*",
-    ]
+    sid       = "DatabaseSecrets"
+    actions   = ["secretsmanager:GetSecretValue"]
+    resources = ["arn:${local.partition}:secretsmanager:${local.region}:${local.account_id}:secret:rds!*"]
   }
 
   # App secrets use the AWS-managed aws/ssm key, which SSM decrypts for any

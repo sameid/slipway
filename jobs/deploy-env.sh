@@ -212,7 +212,6 @@ if [[ "$ACTION" == destroy ]]; then
       -var "migrate_image=$(tf_out migrate_image)"
       -var "release=$(tf_out release)"
       -var "deploy_id=$(tf_out deploy_id)"
-      -var "clerk_publishable_key=$(tf_out clerk_publishable_key)"
     )
     if [[ "$ENV" == prod ]]; then
       echo "Lifting deletion protection; RDS keeps a final snapshot"
@@ -243,16 +242,6 @@ mapfile -t declared < <(appyaml get "$TMP/app.yaml" secrets | sed '/^$/d')
 HEALTH_PATH=$(appyaml get "$TMP/app.yaml" api.health_check)
 
 step secrets-check
-# The environment's Clerk application keys, which the dev team stores in one
-# secret per Clerk application (docs/foundation.md): slipway/clerk/stage or
-# slipway/clerk/production, holding {"publishableKey","secretKey"}. Only the
-# publishable key is kept (it's public); the secret key is checked, never printed.
-case "$ENV" in staging) clerk_name=stage ;; prod) clerk_name=production ;; *) die "no Clerk application for env $ENV" ;; esac
-clerk_secret="slipway/clerk/$clerk_name"
-CLERK_PUBLISHABLE_KEY=$(aws secretsmanager get-secret-value --secret-id "$clerk_secret" --query SecretString --output text 2>/dev/null |
-  jq -r 'if (.publishableKey | type) == "string" and ((.secretKey // "") | startswith("sk_")) then .publishableKey else empty end' 2>/dev/null || true)
-[[ "$CLERK_PUBLISHABLE_KEY" == pk_* ]] ||
-  die "$clerk_secret is missing, or isn't JSON with publishableKey (pk_...) and secretKey (sk_...); the dev team must set it (docs/foundation.md)"
 if ((${#declared[@]})); then
   existing=$(secret_parameters)
   missing=()
@@ -279,7 +268,6 @@ tf_apply \
   -var "service_image=$CURRENT_IMAGE" \
   -var "release=$CURRENT_RELEASE" \
   -var "deploy_id=$CURRENT_DEPLOY_ID" \
-  -var "clerk_publishable_key=$CLERK_PUBLISHABLE_KEY" \
   -var "migrate_image=$NEW_IMAGE"
 
 step migrate
@@ -331,7 +319,6 @@ tf_apply \
   -var "service_image=$NEW_IMAGE" \
   -var "release=$SHORT" \
   -var "deploy_id=$DEPLOY_ID" \
-  -var "clerk_publishable_key=$CLERK_PUBLISHABLE_KEY" \
   -var "migrate_image=$NEW_IMAGE"
 APP_URL=$(tf_req app_url)
 SERVICE_URL=$(tf_out service_url)
@@ -359,9 +346,8 @@ fi
 # sizes and times and would skip an older index.html on rollback.
 aws s3 cp "$TMP/web" "s3://$BUCKET" --recursive --no-follow-symlinks --exclude "assets/*" --exclude config.json \
   --cache-control no-cache --only-show-errors
-WEB_CLERK_KEY=$(tf_req clerk_publishable_key)
-node -e 'process.stdout.write(JSON.stringify({ clerkPublishableKey: process.argv[1], env: process.argv[2], release: process.argv[3] }) + "\n")' \
-  "$WEB_CLERK_KEY" "$ENV" "$SHORT" >"$TMP/config.json"
+node -e 'process.stdout.write(JSON.stringify({ env: process.argv[1], release: process.argv[2] }) + "\n")' \
+  "$ENV" "$SHORT" >"$TMP/config.json"
 aws s3 cp "$TMP/config.json" "s3://$BUCKET/config.json" \
   --content-type application/json --cache-control no-store --only-show-errors
 DISTRIBUTION_ID=$(tf_req distribution_id)

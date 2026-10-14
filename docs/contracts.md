@@ -23,7 +23,7 @@ Everything lives in one repo, so a contract change lands in one PR.
 | Deploy commit status context | `slipway/deploy-staging`, `slipway/deploy-prod` |
 | Plugin marketplace / plugin | `slipway` / `slipway` (install `slipway@slipway`) |
 | Stack skill | `slipway-stack` |
-| Clerk applications | `slipway-local`, `slipway-stage` (every app's `staging`), `slipway-production` (every app's `prod`), in your own Clerk account. Who may sign in (an email-domain allowlist, say) is set in Clerk. Their keys are stored under the Clerk names (`local`, `stage`, `production`) |
+| App sign-in | none: apps are public until their developer adds authentication. The platform has no auth provider and no auth settings |
 | CODEOWNERS entry | the foundation's `github_codeowners`; empty means `@<owner>` on a personal account and `@<app creator>` in an org |
 | Build and deploy execution | the **runner**, a second process on the deployer instance (no CodeBuild, so it works in every region) |
 | Instance role | `slipway-deployer` (the only platform role the deployer and runner use) |
@@ -63,13 +63,15 @@ The foundation (17 Terraform resources) publishes no IDs. Everything else finds 
 | Alerts topic | `arn:aws:sns:<region>:<account>:slipway-alerts` |
 | Buckets | `slipway-tfstate-<account>`, `slipway-artifacts-<account>` |
 
-Created with the CLI when their values exist (docs/foundation.md), never by Terraform:
+The foundation also creates the SSM String `/slipway/deployer/github-access`: JSON `{"allowedUsers":["login"],"codeowners":"@org/team"}` from the `github_allowed_users` and `github_codeowners` inputs. The deployer reads it at startup (`GITHUB_ACCESS_PARAM`); it's a parameter rather than user data so that changing it restarts the deployer instead of replacing the instance.
+
+Created by `slipway setup` with the AWS CLI (docs/foundation.md), never by Terraform:
 
 | Name | Kind | Value |
 |---|---|---|
-| `slipway/clerk/local`, `slipway/clerk/stage`, `slipway/clerk/production` | Secrets Manager | one per Clerk application, all the same shape: JSON `{"publishableKey":"pk_test_...","secretKey":"sk_test_..."}`. `local` is handed out by `GET /api/dev-config` (unused since plugin 0.3.0); `stage` serves every app's staging, `production` every app's prod |
-| `slipway/github-app` | Secrets Manager | JSON `{"appId":"123","privateKey":"-----BEGIN...","webhookSecret":"..."}` |
-| `/slipway/deployer/version` | SSM String | release the instance runs (deployer, runner, job scripts, modules); created and updated by `deployer/scripts/release.sh`. Missing or `unset` means "nothing released yet" |
+| `slipway-tfstate-<account>` | S3 bucket | Terraform state: `foundation/terraform.tfstate`, `apps/<app>/<env>.tfstate`. Also `foundation/terraform.tfvars.json`, the foundation's inputs as setup last applied them (`region`, `github_owner`, `alert_email`, `deployer_az_suffix`, and `budget_amount`, `github_allowed_users`, `github_codeowners` when set); setup merges its flags into it and keeps any other inputs |
+| `slipway/github-app` | Secrets Manager | JSON `{"appId":"123","privateKey":"-----BEGIN...","webhookSecret":"..."}`, from GitHub's App manifest flow |
+| `/slipway/deployer/version` | SSM String | release the instance runs (deployer, runner, job scripts, modules); created and updated by `deployer/scripts/release.sh`. setup releases `<plugin version>-<UTC yyyymmddhhmmss>`. Missing or `unset` means "nothing released yet" |
 
 ## Runner (replaces CodeBuild)
 
@@ -158,7 +160,7 @@ Started by the deployer with `POST /runs`, `kind: "deploy-env"`, no source, and 
 | `WEB_ARTIFACT` | `s3://...web.tgz` (staging/prod apply) |
 | `DEPLOY_ID` | the deployer's job id. Goes into the container environment as `DEPLOY_ID`, so every deploy starts new tasks even when the image is unchanged (needed after a secret changes) |
 
-`jobs/deploy-env.sh` runs as `slipway-runner` with the instance role. It never executes app code. Before applying, it reads the environment's Clerk secret (`slipway/clerk/stage` for staging, `slipway/clerk/production` for prod), checks it holds `publishableKey` (`pk_...`) and `secretKey` (`sk_...`), and passes only the publishable key to Terraform as `clerk_publishable_key`. The secret key never enters Terraform state.
+`jobs/deploy-env.sh` runs as `slipway-runner` with the instance role. It never executes app code.
 
 `app.yaml` comes from `releases/<app>/<sha>/app.yaml`; source zips aren't kept after a build.
 
@@ -171,7 +173,7 @@ Exports: `APP_URL` (`https://dxxxx.cloudfront.net`, staging/prod apply), `SERVIC
 `config.json` written to the web bucket:
 
 ```json
-{ "clerkPublishableKey": "pk_test_...", "env": "staging", "release": "a1b2c3d" }
+{ "env": "staging", "release": "a1b2c3d" }
 ```
 
 `release` everywhere (config.json, container `RELEASE`, `/api/health`) is the first 7 characters of the commit SHA.
@@ -180,9 +182,9 @@ Exports: `APP_URL` (`https://dxxxx.cloudfront.net`, staging/prod apply), `SERVIC
 
 `modules/app-shared` (inputs: `app`) → outputs `ecr_repository_url`, `ecr_repository_name`, `log_group_name`.
 
-`modules/app-env` inputs: `app`, `env`, `size` (`small` | `medium` | `large`), `api_port`, `health_check_path`, `migrate_command` (list), `secret_names` (list), `service_image` (full reference `<repo url>@sha256:...`; `""` = no service and no CloudFront yet), `migrate_image` (same form; `""` = no migrate task definition), `release` (short SHA, container `RELEASE`), `deploy_id`, `clerk_publishable_key` (from the env's Clerk secret), `destroying` (bool). Everything else (default VPC and subnets, boundary, Express infra role, alerts topic, Clerk secret and publishable key, ECR repo, log group) is found by the conventions above.
+`modules/app-env` inputs: `app`, `env`, `size` (`small` | `medium` | `large`), `api_port`, `health_check_path`, `migrate_command` (list), `secret_names` (list), `service_image` (full reference `<repo url>@sha256:...`; `""` = no service and no CloudFront yet), `migrate_image` (same form; `""` = no migrate task definition), `release` (short SHA, container `RELEASE`), `deploy_id`, `destroying` (bool). Everything else (default VPC and subnets, boundary, Express infra role, alerts topic, ECR repo, log group) is found by the conventions above.
 
-Outputs (all strings): `app_url`, `service_url`, `service_name`, `service_image`, `migrate_image`, `release`, `deploy_id`, `cluster_name`, `migrate_task_definition_arn`, `subnet_ids` (comma-joined default subnets), `task_security_group_id`, `web_bucket`, `distribution_id`, `log_group_name`, `env`, `clerk_publishable_key` (for `config.json`), `inputs` (the JSON of the `app.yaml`-derived inputs, which teardown re-applies so lifting deletion protection never resizes anything).
+Outputs (all strings): `app_url`, `service_url`, `service_name`, `service_image`, `migrate_image`, `release`, `deploy_id`, `cluster_name`, `migrate_task_definition_arn`, `subnet_ids` (comma-joined default subnets), `task_security_group_id`, `web_bucket`, `distribution_id`, `log_group_name`, `env`, `inputs` (the JSON of the `app.yaml`-derived inputs, which teardown re-applies so lifting deletion protection never resizes anything).
 
 Sizes:
 
@@ -194,7 +196,7 @@ Sizes:
 
 The presets use `db.t3`, which every region offers (some, like `ca-west-1`, have no `db.t4g` classes for Postgres).
 
-Container environment: `PORT` (= `api.port`), `APP_ENV` (`staging` | `prod`), `RELEASE`, `DEPLOY_ID`, `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_SECRET_ARN`, `CLERK_PUBLISHABLE_KEY`; ECS secrets `CLERK_SECRET_KEY` (the `secretKey` field of `slipway/clerk/stage` or `slipway/clerk/production`) and one per `secrets:` name (from `/apps/<app>/<env>/<KEY>`).
+Container environment: `PORT` (= `api.port`), `APP_ENV` (`staging` | `prod`), `RELEASE`, `DEPLOY_ID`, `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_SECRET_ARN`; ECS secrets, one per `secrets:` name (from `/apps/<app>/<env>/<KEY>`).
 
 Images are `linux/amd64`: provider 6.x's `aws_ecs_express_gateway_service` has no CPU architecture argument, so Express tasks run on X86_64.
 
@@ -202,7 +204,7 @@ Images are `linux/amd64`: provider 6.x's `aws_ecs_express_gateway_service` has n
 
 What `build-release` and `deploy-env` rely on:
 
-- `app.yaml` at the root, schema as in design 5.2. Platform-owned fields: `name`, `auth`, `auto_merge`, `sizes`.
+- `app.yaml` at the root, schema as in design 5.2. Platform-owned fields: `name`, `auto_merge`, `sizes`.
 - npm workspaces `api` and `web` with one root `package-lock.json`. Root scripts: `typecheck`, `lint`, `test` (Vitest, non-watch), `build`. `api` script `db:check` runs `drizzle-kit check`.
 - `api/Dockerfile`, built from the repo root, base image from `public.ecr.aws/docker/library/node:24-slim` (avoids Docker Hub rate limits), listens on `PORT`, runs `node dist/index.js`, contains `dist/migrate.js` and the `drizzle/` folder, and bakes in the RDS CA bundle (`DB_SSL_CA`).
 - `/api/health` returns 200 `{"ok":true,"release":"<RELEASE>","migrations":<n>}` only when the database is reachable.
@@ -214,9 +216,9 @@ Apps aren't run locally (plugin 0.3.0 on): there's no local database, dev server
 
 ## Deployer HTTP API
 
-Base URL: the deployer's CloudFront URL (the foundation's `deployer_url` output). The plugin reads it from `SLIPWAY_DEPLOYER_URL`, else from `~/.config/slipway/config.json` (`$XDG_CONFIG_HOME/slipway/config.json`; written by `slipway setup` / `/setup`), else from `deployerUrl` in `plugin/slipway.config.json` (empty upstream; a team fork can set it).
+Base URL: the deployer's CloudFront URL (the foundation's `deployer_url` output). The plugin reads it from `SLIPWAY_DEPLOYER_URL`, else from `~/.config/slipway/config.json` (`$XDG_CONFIG_HOME/slipway/config.json`), else from `deployerUrl` in `plugin/slipway.config.json` (empty upstream; a team fork can set it). The config file is `{"deployerUrl": "...", "setup": {"account": "...", "region": "...", "profile": "..." | null}}`: `slipway connect` writes `deployerUrl`, `slipway setup` writes both, and reads `setup` on later runs.
 
-**Auth.** Every `/api/*` call sends `Authorization: Bearer <gh auth token>`. The deployer calls `GET https://api.github.com/user` with it, then decides whether the login may use the deployer. If the owner is an org: membership, checked with the App's installation token (`GET /orgs/<owner>/members/<login>` → 204). If it's a personal account: the login is the owner or is in `GITHUB_ALLOWED_USERS` (case-insensitive). The result is cached for 10 minutes keyed by the token's SHA-256. `401 {"error":"invalid GitHub token"}`; `403 {"error":"<login> is not a member of <owner>"}` (org) or `403 {"error":"<login> isn't allowed to use this deployer: ask <owner> to add you to its allowed users"}` (personal account).
+**Auth.** Every `/api/*` call sends `Authorization: Bearer <gh auth token>`. The deployer calls `GET https://api.github.com/user` with it, then decides whether the login may use the deployer. If the owner is an org: membership, checked with the App's installation token (`GET /orgs/<owner>/members/<login>` → 204). If it's a personal account: the login is the owner or is in the allowed users (`/slipway/deployer/github-access`, else `GITHUB_ALLOWED_USERS`; case-insensitive). The result is cached for 10 minutes keyed by the token's SHA-256. `401 {"error":"invalid GitHub token"}`; `403 {"error":"<login> is not a member of <owner>"}` (org) or `403 {"error":"<login> isn't allowed to use this deployer: ask <owner> to add you (slipway setup --allowed-users)"}` (personal account).
 
 **Errors** are `{"error": "<message>"}` with a 4xx/5xx status.
 
@@ -265,7 +267,6 @@ type SecretStatus = { set: boolean; lastSetBy: string | null; lastSetAt: string 
 | Method and path | Request | Response |
 |---|---|---|
 | `GET /api/whoami` | | `{ "login": "jane", "owner": "acme", "ownerType": "Organization" \| "User", "codeowners": "@acme/platform" }`. The plugin creates repos under `owner` and fills the template's `__APP_CODEOWNERS__` with `codeowners` |
-| `GET /api/dev-config` | | `{ "clerkPublishableKey": "pk_test_...", "clerkSecretKey": "sk_test_..." }`. Unused since plugin 0.3.0, which doesn't run apps locally |
 | `GET /api/apps/:name` | | `App`, or `404` if not registered |
 | `POST /api/apps` | `{ "name": "my-app" }` (repo is always `<owner>/<name>`) | `201 App` plus `"warning": string \| null`. The warning is set when GitHub's plan can't protect the private repo (GitHub Free): the app is registered anyway, with `main` unprotected. `409` if registered, `400` if the name is invalid, the repo is missing, or `app.yaml` on `main` is missing or its `name` differs (the repo and `app.yaml` are retried for a few seconds first, since the plugin calls this right after pushing). The caller's login becomes `owner`. Re-registering an app whose status is `failed` is allowed for its owner and queues the chain again. |
 | `GET /api/apps/:name/pulls/:number` | | `PullRequest` (`status: "unknown"` and `headSha: ""` if the deployer hasn't seen it yet) |
@@ -306,7 +307,7 @@ ecosystem.config.cjs   pm2 apps; reads /etc/slipway/deployer.env and /etc/slipwa
 Caddyfile
 ```
 
-- **`/opt/slipway/bin/update-deployer.sh [version]`** (installed by user data) downloads the version in `/slipway/deployer/version` (or the one given; a missing parameter means nothing is released yet), runs `npm ci --omit=dev` in `deployer/` and `jobs/`, runs `jobs/install-tools.sh` (Terraform, gitleaks), installs `Caddyfile`, flips `current`, reloads Caddy, then `pm2 startOrReload ecosystem.config.cjs` and `pm2 save`. `deployer/scripts/release.sh` (dev team) packs, uploads, sets `/slipway/deployer/version` and runs this script through SSM Run Command.
+- **`/opt/slipway/bin/update-deployer.sh [version]`** (installed by user data) downloads the version in `/slipway/deployer/version` (or the one given; a missing parameter means nothing is released yet), runs `npm ci --omit=dev` in `deployer/` and `jobs/`, runs `jobs/install-tools.sh` (Terraform, gitleaks), installs `Caddyfile`, flips `current`, reloads Caddy, then `pm2 startOrReload ecosystem.config.cjs` and `pm2 save`. `deployer/scripts/release.sh` (run by `slipway setup`, or by hand) packs, uploads, sets `/slipway/deployer/version` and runs this script through SSM Run Command.
 - **Data:** `DATA_DIR=/var/lib/slipway` (`deployer.db`; owner `slipway`, mode `0700`), on the root EBS volume with no backup yet (EBS snapshots are a planned follow-up). Runner data in `/var/lib/slipway-runner` (owner `slipway-runner`, mode `0750`).
 - `/etc/slipway/deployer.env`:
 
@@ -317,12 +318,10 @@ PORT=3000
 AWS_REGION=<region>
 DATA_DIR=/var/lib/slipway
 GITHUB_OWNER=<owner>
-GITHUB_ALLOWED_USERS=<comma-separated logins, or empty>
-GITHUB_CODEOWNERS=<entry, or empty>
+GITHUB_ACCESS_PARAM=/slipway/deployer/github-access   # allowed users and codeowners; locally, GITHUB_ALLOWED_USERS and GITHUB_CODEOWNERS instead
 PUBLIC_URL=https://dxxxx.cloudfront.net
 RUNNER_SOCKET=/run/slipway/runner.sock
 GITHUB_APP_SECRET_ID=slipway/github-app
-CLERK_LOCAL_SECRET_ID=slipway/clerk/local
 ALERTS_TOPIC_ARN=arn:aws:sns:<region>:<account>:slipway-alerts
 ```
 

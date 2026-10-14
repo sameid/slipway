@@ -12,8 +12,8 @@ terraform {
     }
   }
 
-  # bucket and region come from backend.hcl (see backend.hcl.example):
-  #   terraform init -backend-config=backend.hcl
+  # `slipway setup` passes the bucket (slipway-tfstate-<account>) and region:
+  #   terraform init -backend-config=bucket=... -backend-config=region=...
   backend "s3" {
     key          = "foundation/terraform.tfstate"
     use_lockfile = true

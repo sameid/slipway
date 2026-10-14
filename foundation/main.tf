@@ -9,9 +9,8 @@
 #   alerts.tf    the alerts topic and the region's budget
 #   this file    one bucket for release artifacts and the deployer's backups
 #
-# Secrets and Clerk keys aren't Terraform resources: the dev team creates them
-# with the CLI once the values exist (docs/foundation.md). Names are fixed by
-# docs/contracts.md.
+# Secrets aren't Terraform resources: they're created with the CLI once the
+# values exist (docs/foundation.md). Names are fixed by docs/contracts.md.
 
 data "aws_caller_identity" "current" {}
 data "aws_partition" "current" {}
@@ -36,8 +35,8 @@ locals {
   state_bucket = "slipway-tfstate-${local.account_id}"
 }
 
-# The bootstrap stack creates the state bucket; reading it here fails fast if
-# it hasn't been run in this account.
+# `slipway setup` creates the state bucket before applying this; reading it
+# here fails fast if it doesn't exist.
 data "aws_s3_bucket" "state" {
   bucket = local.state_bucket
 }

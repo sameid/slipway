@@ -38,7 +38,7 @@ describe("plugin API auth", () => {
     expect(await auth.check("fake:bob")).toEqual({ login: "bob" });
     expect(await auth.check("fake:alice")).toEqual({
       status: 403,
-      error: "alice isn't allowed to use this deployer: ask sam to add you to its allowed users",
+      error: "alice isn't allowed to use this deployer: ask sam to add you (slipway setup --allowed-users)",
     });
     expect(member).not.toHaveBeenCalled();
   });

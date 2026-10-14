@@ -1,6 +1,0 @@
-# Copy to backend.hcl (git-ignored) with your account ID and region; bootstrap
-# prints exactly this as the backend_hcl output. Then:
-#   terraform init -backend-config=backend.hcl
-# key, use_lockfile and encrypt are set in versions.tf.
-bucket = "slipway-tfstate-123456789012"
-region = "us-east-1"

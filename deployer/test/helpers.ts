@@ -26,7 +26,6 @@ export const testConfig = (over: Partial<Config> = {}): Config => ({
   allowedUsers: [],
   runnerSocket: "/nonexistent/runner.sock",
   githubAppSecretId: "slipway/github-app",
-  clerkLocalSecretId: "slipway/clerk/local",
   publicUrl: "https://deployer.test",
   registerRetryMs: 0,
   workerIntervalMs: 60_000,

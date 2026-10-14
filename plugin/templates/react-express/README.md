@@ -2,7 +2,7 @@
 
 __APP_DESCRIPTION__
 
-Owner: @__APP_OWNER__. Built on slipway: React, TanStack Query, HeroUI and Tailwind in `web/`, Express and Drizzle on Postgres in `api/`, sign-in with Clerk.
+Owner: @__APP_OWNER__. Built on slipway: React, TanStack Query, HeroUI and Tailwind in `web/`, Express and Drizzle on Postgres in `api/`. There's no sign-in, so anyone with the app's link can use it; add authentication before it holds anything private.
 
 ## Make changes
 

@@ -1,56 +1,65 @@
 # slipway
 
-A self-hosted platform for internal apps built with Claude Code. A colleague runs `/new-app` in Claude Code and gets a GitHub repo and a live staging link with working sign-in a few minutes later. After that they describe features, and `/ship` opens a pull request that merges and deploys to staging once its check passes. A person promotes staging to prod from the deployer dashboard.
+A Claude Code plugin that builds and ships apps on your own AWS and GitHub accounts. Install it, run `/setup` once, and slipway sets itself up in your AWS account. Then `/new-app` gives you a GitHub repo and a live staging link a few minutes later. After that you describe features, and `/ship` opens a pull request that merges and deploys to staging once its check passes. You promote staging to prod from the deployer dashboard.
 
-You bring the accounts: slipway runs in **your AWS account**, creates app repos under **your GitHub org or personal account**, and signs users in with **your Clerk applications**. Colleagues need no AWS credentials; the plugin only uses the GitHub CLI and the deployer's API.
+Everything runs in **your AWS account** and creates repos under **your GitHub org or personal account**. There's no slipway service in between and nothing to sign up for.
 
-Every app gets a staging and a prod environment: Postgres on RDS, an API on ECS Express Mode (Fargate), and a frontend on S3 and CloudFront. App repos hold no Terraform and no build scripts, so nothing an agent changes in an app can change how its infrastructure is built.
+Every app gets a staging and a prod environment: Postgres on RDS, an API on ECS Express Mode (Fargate), and a frontend on S3 and CloudFront. Apps have no sign-in: what you deploy is public until you add authentication yourself. App repos hold no Terraform and no build scripts, so nothing an agent changes in an app can change how its infrastructure is built.
 
-## What you need
+## Get started
 
-- **An AWS account and a region dedicated to slipway.** The deployer's instance role may do anything in that region (outside it, it's limited to slipway's own IAM roles and CloudFront distributions), so don't share the region with anything else. A separate AWS account is best. The region must offer ECS Express Mode. `docs/foundation.md` has the checks to run first.
-- **A GitHub org or personal account** for the app repos, where you can create a GitHub App. The App is installed on every repo of that owner and can write to them, so use an owner that holds only slipway apps.
-  - In an org, its members can use slipway. On a personal account, you can, plus anyone you list in `github_allowed_users`, but only you can create apps.
-  - GitHub Free can't protect branches of private repos. Apps still work, but `main` isn't protected, so a direct push deploys to staging without the check. GitHub Pro or Team fixes that.
-- **A Clerk account** with three applications (local, staging and prod). Who may sign in to apps (your email domain, say) is set in Clerk.
-- **Tools:** Terraform 1.11 or later (or Docker with the `hashicorp/terraform` image), the AWS CLI, Node.js 24 and the GitHub CLI.
-- **A budget.** The foundation is one `t3.small`, an Elastic IP, a CloudFront distribution and two buckets. Each app environment adds its own RDS instance, ECS Express Mode service (Fargate behind a load balancer) and CloudFront distribution. The foundation sets an AWS Budget for the region (default $500 a month) that emails you at 80% and at the 100% forecast.
+You need:
 
-## Set it up
+- **Claude Code**, **Node.js 24**, and the **GitHub CLI** signed in (`gh auth login`).
+- **An AWS account** with admin credentials in the AWS CLI v2, and **a region you'll use only for slipway**. The deployer's instance role may do anything in that region, so a separate AWS account just for slipway is best. The region must offer ECS Express Mode.
+- **Terraform 1.11 or later** (on a Mac: `brew tap hashicorp/tap && brew install hashicorp/tap/terraform`).
+- **A GitHub org or personal account** for the app repos. slipway's GitHub App is installed on all of its repositories and can write to them, so use one that holds only slipway apps.
 
-`docs/foundation.md` is the full runbook. In short:
+Then, in Claude Code:
 
-1. Create the Terraform state bucket: `foundation/bootstrap` with `-var region=<region>`.
-2. Copy `foundation/terraform.tfvars.example` to `terraform.tfvars`. Set `region`, `github_owner` and `alert_email`, and apply `foundation/`.
-3. Create the GitHub App on your org or account and your Clerk applications, and store their keys in Secrets Manager (`slipway/github-app`, `slipway/clerk/{local,stage,production}`).
-4. Release the deployer: `AWS_REGION=<region> deployer/scripts/release.sh`. Then create your dashboard account.
-5. Each colleague installs the plugin and points it at your deployer:
+```
+/plugin marketplace add sameid/slipway
+/plugin install slipway@slipway
+/setup
+```
 
-   ```
-   /plugin marketplace add sameid/slipway
-   /plugin install slipway@slipway
-   /setup https://dxxxx.cloudfront.net
-   ```
+`/setup` asks for your AWS profile, region, GitHub owner and email, shows what it will create, and waits for your yes. Then, over 20 to 30 minutes, it:
 
-   The URL is the foundation's `deployer_url` output. Then `/new-app`.
+1. creates a Terraform state bucket and applies the foundation: one `t3.small` deployer instance behind CloudFront, IAM roles, an artifacts bucket, an alerts topic and a budget;
+2. creates slipway's GitHub App through GitHub's manifest flow. A browser page sends you to GitHub, where you click **Create GitHub App**, then install it on **All repositories**;
+3. releases the deployer onto the instance and creates your dashboard account.
 
-Every script that talks to AWS shows the account it's about to use and asks for confirmation first.
+Then run `/new-app`. Run `/setup` again after a plugin update to update your deployer; it remembers everything from the first run.
+
+**Cost.** The foundation costs about $20–25 a month before any apps. Each app adds its own small RDS database, ECS Express Mode service and CloudFront distribution per environment. The foundation sets an AWS Budget for the region (default $500 a month; `--budget` changes it) that emails you at 80% and at the 100% forecast.
+
+**GitHub Free** can't protect branches of private repos. Apps still work, but `main` isn't protected, so a direct push deploys to staging without the check. GitHub Pro or Team fixes that.
+
+## Sharing a deployer
+
+One person runs `/setup`; everyone else runs `/connect <deployer url>`.
+
+- **Org:** every member of the org can use the deployer.
+- **Personal account:** only you can, unless you add people with `slipway setup --yes --allowed-users <logins>`. They also need write access to the app repos, and only you can run `/new-app`, because nobody else can create repos in your account.
 
 ## Layout
 
+The repo is the plugin: Claude Code installs all of it, so `/setup` has the infrastructure code next to it.
+
 ```
-plugin/              the Claude Code plugin (/setup, /new-app, /ship, /status, /secret, /destroy-app)
-                     and the app template; .claude-plugin/marketplace.json at the root lists it
-foundation/          shared infrastructure in your region (~17 resources): deployer instance, CloudFront,
-                     IAM, artifacts bucket, alerts topic, budget
-  bootstrap/         creates the Terraform state bucket (local state)
+.claude-plugin/      plugin.json and marketplace.json
+bin/slipway          the plugin's CLI (on PATH in Claude Code); the code is in plugin/cli
+plugin/              commands (/setup, /connect, /new-app, /ship, /status, /secret, /destroy-app),
+                     skills, hooks, the app template and the CLI
+foundation/          shared infrastructure in your region: deployer instance, CloudFront, IAM,
+                     artifacts bucket, alerts topic, budget
 modules/
   app-shared/        per-app ECR repository and log group
   app-env/           one app environment: RDS, ECS Express service, migrate task, S3 + CloudFront
 jobs/                build-release.sh and deploy-env.sh, run by the runner on the deployer instance
 deployer/            the deployer (dashboard, plugin API, GitHub webhooks, job worker) and the runner
 docs/
-  foundation.md      runbook: foundation, GitHub App, Clerk, secrets, first release, plugin setup
+  foundation.md      what /setup does, operating the deployer, and doing it all by hand
   contracts.md       names, conventions, API shapes and job inputs shared between the pieces
   design.md          the original design doc, with "Changes since Draft v7"
 ```
@@ -58,20 +67,21 @@ docs/
 ## How the pieces fit
 
 1. The plugin creates an app repo from its template under your GitHub owner and registers it with the deployer.
-2. The deployer reacts to GitHub webhooks and queues jobs. For each job it hands the runner (a second process on the same instance, over a Unix socket) either the commit's zipball for a build or the inputs for a deploy.
+2. The deployer reacts to GitHub webhooks and queues jobs. For each job it hands the runner, a second process on the same instance reached over a Unix socket, one of two things: the commit's zipball for a build, or the inputs for a deploy.
 3. The runner runs `jobs/build-release.sh` or `jobs/deploy-env.sh`. Steps that execute app code run as a separate Linux user with no AWS credentials. `deploy-env` renders a Terraform root config for the app and environment from `app.yaml` and applies `modules/app-env`.
 
-The deployer, the runner, `jobs/` and `modules/` ship together as one release (`deployer/scripts/release.sh`). Changing build or deploy behaviour means releasing a new version. Builds run on the deployer instance rather than in CodeBuild, which keeps the platform to one instance and works in every region.
+The deployer, the runner, `jobs/` and `modules/` ship together as one release, versioned with the plugin. Builds run on the deployer instance rather than in CodeBuild, which keeps the platform to one instance and works in every region. Only `/setup` uses AWS credentials; everything else the plugin does goes through the GitHub CLI and the deployer's API.
 
 ## Development
 
 ```sh
-(cd plugin && npm test)                 # CLI and hook tests, no dependencies
+(cd plugin && npm test)                 # CLI, setup and hook tests, no dependencies
 (cd jobs && npm ci && npm test)         # app.yaml rendering
 (cd deployer && npm ci && npm run typecheck && npm test)
+(cd plugin && npm run validate)         # plugin and marketplace manifests
 ```
 
-The deployer has a fake mode (`DEPLOYER_FAKE=1`) with an in-memory GitHub and a simulated runner, so the plugin and the deployer can be run end to end on a laptop (`deployer/README.md`). Interfaces between the pieces are pinned in `docs/contracts.md`; change both sides in the same PR.
+The deployer has a fake mode (`DEPLOYER_FAKE=1`) with an in-memory GitHub and a simulated runner, so the plugin and the deployer can be run end to end on a laptop (`deployer/README.md`). To try the plugin from a checkout, `claude --plugin-dir .` loads it in place. Interfaces between the pieces are pinned in `docs/contracts.md`; change both sides in the same PR.
 
 ## License
 

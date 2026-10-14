@@ -3,22 +3,27 @@ import request from "supertest";
 import { app } from "./app.js";
 
 // No database in unit tests: the db module is replaced by a stub whose
-// execute() each test controls. Clerk gets well-formed but fake keys; requests
-// without a valid session token never reach Clerk's servers.
-const { execute } = vi.hoisted(() => {
-  process.env.CLERK_PUBLISHABLE_KEY = `pk_test_${Buffer.from("example.clerk.accounts.dev$").toString("base64")}`;
-  process.env.CLERK_SECRET_KEY = "sk_test_unit_tests";
-  return { execute: vi.fn() };
+// methods each test controls.
+const db = vi.hoisted(() => {
+  const returning = vi.fn();
+  const values = vi.fn(() => ({ returning }));
+  return {
+    execute: vi.fn(),
+    query: { notes: { findMany: vi.fn() } },
+    insert: vi.fn(() => ({ values })),
+    values,
+    returning,
+  };
 });
 
 vi.mock("./db/client.js", () => ({
-  db: { execute },
+  db,
   pool: {},
   forgetCredentials: vi.fn(),
 }));
 
 afterEach(() => {
-  execute.mockReset();
+  vi.clearAllMocks();
   vi.unstubAllEnvs();
   vi.restoreAllMocks();
 });
@@ -26,7 +31,7 @@ afterEach(() => {
 describe("GET /api/health", () => {
   it("reports the release and applied migrations when the database is up", async () => {
     vi.stubEnv("RELEASE", "a1b2c3d");
-    execute.mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce({ rows: [{ n: 2 }] });
+    db.execute.mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce({ rows: [{ n: 2 }] });
 
     const res = await request(app).get("/api/health");
 
@@ -36,7 +41,7 @@ describe("GET /api/health", () => {
 
   it("returns 503 when the database is unreachable", async () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
-    execute.mockRejectedValueOnce(new Error("connect ECONNREFUSED"));
+    db.execute.mockRejectedValueOnce(new Error("connect ECONNREFUSED"));
 
     const res = await request(app).get("/api/health");
 
@@ -45,19 +50,45 @@ describe("GET /api/health", () => {
   });
 });
 
-describe("GET /api/me", () => {
-  it("returns 401 JSON without a session token", async () => {
-    const res = await request(app).get("/api/me");
+describe("/api/notes", () => {
+  it("lists notes, newest first", async () => {
+    const rows = [{ id: 2, body: "Second", createdAt: "2026-01-02T00:00:00.000Z" }];
+    db.query.notes.findMany.mockResolvedValueOnce(rows);
 
-    expect(res.status).toBe(401);
-    expect(res.body).toEqual({ error: "unauthenticated" });
+    const res = await request(app).get("/api/notes");
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ notes: rows });
   });
 
-  it("returns 401 JSON with an invalid session token", async () => {
-    const res = await request(app).get("/api/me").set("Authorization", "Bearer not-a-real-token");
+  it("adds a note, trimmed", async () => {
+    const note = { id: 3, body: "Hello", createdAt: "2026-01-03T00:00:00.000Z" };
+    db.returning.mockResolvedValueOnce([note]);
 
-    expect(res.status).toBe(401);
-    expect(res.body).toEqual({ error: "unauthenticated" });
+    const res = await request(app).post("/api/notes").send({ body: "  Hello " });
+
+    expect(res.status).toBe(201);
+    expect(res.body).toEqual({ note });
+    expect(db.values).toHaveBeenCalledWith({ body: "Hello" });
+  });
+
+  it("rejects an empty or overlong note without touching the database", async () => {
+    for (const body of ["", "   ", "x".repeat(501), 42]) {
+      const res = await request(app).post("/api/notes").send({ body });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/1 to 500 characters/);
+    }
+    expect(db.insert).not.toHaveBeenCalled();
+  });
+
+  it("returns JSON 500 when the database fails", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    db.query.notes.findMany.mockRejectedValueOnce(new Error("boom"));
+
+    const res = await request(app).get("/api/notes");
+
+    expect(res.status).toBe(500);
+    expect(res.body).toEqual({ error: "internal error" });
   });
 });
 

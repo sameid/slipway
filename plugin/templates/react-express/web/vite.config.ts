@@ -8,7 +8,7 @@ import tailwindcss from "@tailwindcss/vite";
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   build: {
-    chunkSizeWarningLimit: 1024, // Clerk's SDK alone is about 500 kB
+    chunkSizeWarningLimit: 1024, // HeroUI and React Aria alone are over 500 kB
   },
   test: {
     environment: "jsdom",

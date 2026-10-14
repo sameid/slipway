@@ -1,16 +1,18 @@
 import express, { type ErrorRequestHandler } from "express";
-import { clerkMiddleware } from "@clerk/express";
 import { sql } from "drizzle-orm";
 import { db, forgetCredentials } from "./db/client.js";
-import { me } from "./routes/me.js";
+import { notesRouter } from "./routes/notes.js";
 
 export const app = express();
 app.disable("x-powered-by");
 app.set("trust proxy", true); // CloudFront -> load balancer -> here
 app.use(express.json());
 
-// Public, and the platform's health check. 200 only when the database is
-// reachable; also reports the running release and applied migrations.
+// There's no sign-in: every route is public. Add authentication before the
+// app stores anything that shouldn't be.
+
+// The platform's health check. 200 only when the database is reachable; also
+// reports the running release and applied migrations.
 app.get("/api/health", async (_req, res) => {
   try {
     await db.execute(sql`select 1`);
@@ -26,12 +28,7 @@ app.get("/api/health", async (_req, res) => {
   res.json({ ok: true, release: process.env.RELEASE ?? "dev", migrations });
 });
 
-// Verifies the session token (Authorization: Bearer ...) locally against
-// Clerk's public keys. Reads CLERK_SECRET_KEY and CLERK_PUBLISHABLE_KEY.
-app.use(clerkMiddleware());
-
-// Every route below uses requireUser (see auth.ts).
-app.use("/api", me);
+app.use("/api", notesRouter);
 
 app.use("/api", (_req, res) => {
   res.status(404).json({ error: "not found" });

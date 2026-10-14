@@ -4,7 +4,7 @@
 import { randomUUID } from "node:crypto";
 import { AwsPlatform, loadGithubAppSecret, loadParameter } from "./aws.js";
 import { createApp } from "./app.js";
-import { loadConfig } from "./config.js";
+import { loadConfig, withGithubAccess } from "./config.js";
 import { openDb } from "./db/client.js";
 import { runMigrations } from "./db/migrate.js";
 import { consoleLog, type Deps } from "./deps.js";
@@ -15,7 +15,14 @@ import { OctokitGitHub } from "./github.js";
 import { SocketRuns } from "./runs.js";
 import { pruneOld, Worker } from "./worker.js";
 
-const config = loadConfig();
+const base = loadConfig();
+// On the instance, who else may use the deployer and the CODEOWNERS entry are an SSM
+// parameter rather than user data, so changing them restarts the deployer instead of
+// replacing the instance (foundation/deployer.tf).
+const config =
+  base.githubAccessParam && !base.fake
+    ? withGithubAccess(base, await loadParameter(base.region, base.githubAccessParam))
+    : base;
 const db = openDb(config.dbFile);
 runMigrations(db);
 
@@ -50,7 +57,6 @@ if (config.fake) {
     platform: new AwsPlatform({
       region: config.region,
       kmsKeyId: config.secretsKmsKeyId,
-      clerkLocalSecretId: config.clerkLocalSecretId,
       alertsTopicArn: config.alertsTopicArn,
     }),
     publicUrl: (await resolvePublicUrl(config)).replace(/\/$/, ""),

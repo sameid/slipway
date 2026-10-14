@@ -4,12 +4,12 @@ variable "region" {
 }
 
 variable "github_owner" {
-  description = "GitHub org or personal account that owns every app repo. The deployer's GitHub App is installed on it."
+  description = "GitHub org or personal account that owns every app repo. The deployer's GitHub App is installed on it. It's in the instance's user data, so changing it replaces the instance."
   type        = string
 }
 
 variable "github_allowed_users" {
-  description = "Personal-account owners only: other GitHub logins allowed to use the plugin API. In an org, membership decides instead. They also need write access to the app repos."
+  description = "Personal-account owners only: other GitHub logins allowed to use the plugin API. In an org, membership decides instead. They also need write access to the app repos. Changing it restarts the deployer (slipway setup --allowed-users)."
   type        = list(string)
   default     = []
 }
