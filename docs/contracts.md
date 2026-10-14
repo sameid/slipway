@@ -15,17 +15,17 @@ Everything lives in one repo, so a contract change lands in one PR.
 
 | Thing | Name |
 |---|---|
-| Region | `ca-west-1` |
+| Region | the foundation's `region` (required). It's dedicated to slipway: the instance role may do anything in it |
 | Default tags | `platform=slipway`, plus `app=<name>`, `env=<env>` on per-app resources |
-| GitHub org | `acme` (the company's; every app repo is `acme/<name>`) |
-| GitHub App | `slipway-deployer`, installed on **all** repos in the org |
+| GitHub owner | the foundation's `github_owner`: an org or a personal account. Every app repo is `<owner>/<name>` |
+| GitHub App | any unique name (suggested: `slipway-<owner>`), installed on **all** repos of the owner. The deployer reads its slug from `GET /app` |
 | Check commit status context | `slipway/check` |
 | Deploy commit status context | `slipway/deploy-staging`, `slipway/deploy-prod` |
 | Plugin marketplace / plugin | `slipway` / `slipway` (install `slipway@slipway`) |
 | Stack skill | `slipway-stack` |
-| Clerk applications | `slipway-local`, `slipway-stage` (every app's `staging`), `slipway-production` (every app's `prod`); allowlist `example.com`. Their keys are stored under the Clerk names (`local`, `stage`, `production`) |
-| CODEOWNERS team | `@acme/dev-team` |
-| Build and deploy execution | the **runner**, a second process on the deployer instance (CodeBuild isn't available in `ca-west-1`) |
+| Clerk applications | `slipway-local`, `slipway-stage` (every app's `staging`), `slipway-production` (every app's `prod`), in your own Clerk account. Who may sign in (an email-domain allowlist, say) is set in Clerk. Their keys are stored under the Clerk names (`local`, `stage`, `production`) |
+| CODEOWNERS entry | the foundation's `github_codeowners`; empty means `@<owner>` on a personal account and `@<app creator>` in an org |
+| Build and deploy execution | the **runner**, a second process on the deployer instance (no CodeBuild, so it works in every region) |
 | Instance role | `slipway-deployer` (the only platform role the deployer and runner use) |
 | IAM permissions boundary | managed policy `slipway-boundary` |
 | Express infrastructure role | `slipway-ecs-express-infra` (shared by every app; trusts `ecs.amazonaws.com`, AWS managed policy `AmazonECSInfrastructureRoleforExpressGatewayServices`) |
@@ -60,7 +60,7 @@ The foundation (17 Terraform resources) publishes no IDs. Everything else finds 
 | Network | the default VPC (`data "aws_vpc" { default = true }`) and its default subnets (`default-for-az`). App tasks and the deployer get public IPs; RDS has none and accepts connections only from its app's task security group |
 | Permissions boundary | `arn:aws:iam::<account>:policy/slipway-boundary` |
 | Express infrastructure role | `arn:aws:iam::<account>:role/slipway-ecs-express-infra` |
-| Alerts topic | `arn:aws:sns:ca-west-1:<account>:slipway-alerts` |
+| Alerts topic | `arn:aws:sns:<region>:<account>:slipway-alerts` |
 | Buckets | `slipway-tfstate-<account>`, `slipway-artifacts-<account>` |
 
 Created with the CLI when their values exist (docs/foundation.md), never by Terraform:
@@ -73,7 +73,7 @@ Created with the CLI when their values exist (docs/foundation.md), never by Terr
 
 ## Runner (replaces CodeBuild)
 
-CodeBuild isn't available in `ca-west-1`, so builds and deploys run on the deployer instance in a second process, the **runner**. The deployer and the runner are plain Node.js processes under pm2. The only containers are the Docker builds of app images.
+Builds and deploys run on the deployer instance in a second process, the **runner**, rather than in CodeBuild: one instance, and nothing that depends on a region offering CodeBuild. The deployer and the runner are plain Node.js processes under pm2. The only containers are the Docker builds of app images.
 
 **Users on the instance**
 
@@ -102,7 +102,7 @@ Runs survive a runner restart: queued runs stay queued; runs that were running e
 
 **Run directory.** `/var/lib/slipway-runner/runs/<id>/` holds `run.json`, `log`, `exports.env` and `work/`. `work/` is deleted when the run ends; run directories are deleted after 30 days.
 
-**AWS credentials.** The runner uses the instance role directly (`RUNNER_PUBLISH_PROFILE` and `RUNNER_DEPLOY_PROFILE` are empty, so no `AWS_PROFILE` is set). Anything running as `slipway` or `slipway-runner` has the instance role's permissions; `slipway-build` has none, because it can't reach the metadata service. The instance role can do anything in `ca-west-1` except IAM, STS, Organizations and Account actions. Outside the region it can manage only `app-*` IAM roles (which must carry `slipway-boundary`), CloudFront distributions tagged `platform=slipway`, and `app-*` CloudFront functions.
+**AWS credentials.** The runner uses the instance role directly (`RUNNER_PUBLISH_PROFILE` and `RUNNER_DEPLOY_PROFILE` are empty, so no `AWS_PROFILE` is set). Anything running as `slipway` or `slipway-runner` has the instance role's permissions; `slipway-build` has none, because it can't reach the metadata service. The instance role can do anything in the region except IAM, STS, Organizations and Account actions. Outside the region it can manage only `app-*` IAM roles (which must carry `slipway-boundary`), CloudFront distributions tagged `platform=slipway`, and `app-*` CloudFront functions.
 
 **Build user handoff.** pm2 drops supplementary groups, so the handoff uses modes and an ACL. The run directory stays the runner's (`0750`); while a build runs, an ACL gives `slipway-build` only traverse (`x`) on it. `work/` is `0777`: only the runner and `slipway-build` can reach it, so its "other" bits are effectively the build user's. `prepare` makes the source `a+rwX`, and `verify` leaves its output `a+rX` for the image and publish phases. When the run ends the runner deletes `work/` as `slipway-build` (`sudo -n -H -u slipway-build`) and removes the ACL. `verify` runs under `env -i`, without AWS variables, and its exports go to `/dev/null`.
 
@@ -111,7 +111,7 @@ Runs survive a runner restart: queued runs stay queued; runs that were running e
 | Variable | Value |
 |---|---|
 | job inputs | listed under build-release and deploy-env below |
-| `AWS_REGION` | `ca-west-1` |
+| `AWS_REGION` | the foundation's region |
 | `AWS_ACCOUNT_ID`, `RELEASES_BUCKET`, `STATE_BUCKET` | from the runner's environment |
 | `SLIPWAY_HOME` | the release directory; scripts are in `$SLIPWAY_HOME/jobs`, modules in `$SLIPWAY_HOME/modules` |
 | `SLIPWAY_WORK` | `<run dir>/work` |
@@ -192,7 +192,7 @@ Sizes:
 | medium | 512 / 1024 | db.t3.small | 50 GB |
 | large | 1024 / 2048 | db.t3.medium | 100 GB |
 
-RDS in `ca-west-1` has no `db.t4g` (Graviton) classes for Postgres, so the presets use `db.t3`.
+The presets use `db.t3`, which every region offers (some, like `ca-west-1`, have no `db.t4g` classes for Postgres).
 
 Container environment: `PORT` (= `api.port`), `APP_ENV` (`staging` | `prod`), `RELEASE`, `DEPLOY_ID`, `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_SECRET_ARN`, `CLERK_PUBLISHABLE_KEY`; ECS secrets `CLERK_SECRET_KEY` (the `secretKey` field of `slipway/clerk/stage` or `slipway/clerk/production`) and one per `secrets:` name (from `/apps/<app>/<env>/<KEY>`).
 
@@ -214,13 +214,13 @@ Apps aren't run locally (plugin 0.3.0 on): there's no local database, dev server
 
 ## Deployer HTTP API
 
-Base URL: the deployer's CloudFront URL (`/slipway/deployer/public-url`). The plugin reads it from `SLIPWAY_DEPLOYER_URL` or else from `slipway.config.json` at the plugin root.
+Base URL: the deployer's CloudFront URL (the foundation's `deployer_url` output). The plugin reads it from `SLIPWAY_DEPLOYER_URL`, else from `~/.config/slipway/config.json` (`$XDG_CONFIG_HOME/slipway/config.json`; written by `slipway setup` / `/setup`), else from `deployerUrl` in `plugin/slipway.config.json` (empty upstream; a team fork can set it).
 
-**Auth.** Every `/api/*` call sends `Authorization: Bearer <gh auth token>`. The deployer calls `GET https://api.github.com/user` with it, then checks membership with the App's installation token (`GET /orgs/acme/members/<login>` → 204), and caches the result for 10 minutes keyed by the token's SHA-256. `401 {"error":"invalid GitHub token"}`, `403 {"error":"<login> is not a member of acme"}`.
+**Auth.** Every `/api/*` call sends `Authorization: Bearer <gh auth token>`. The deployer calls `GET https://api.github.com/user` with it, then decides whether the login may use the deployer. If the owner is an org: membership, checked with the App's installation token (`GET /orgs/<owner>/members/<login>` → 204). If it's a personal account: the login is the owner or is in `GITHUB_ALLOWED_USERS` (case-insensitive). The result is cached for 10 minutes keyed by the token's SHA-256. `401 {"error":"invalid GitHub token"}`; `403 {"error":"<login> is not a member of <owner>"}` (org) or `403 {"error":"<login> isn't allowed to use this deployer: ask <owner> to add you to its allowed users"}` (personal account).
 
 **Errors** are `{"error": "<message>"}` with a 4xx/5xx status.
 
-**Fake mode for local development** (`DEPLOYER_FAKE=1`): tokens of the form `fake:<login>` are accepted as org members; GitHub and the runner are simulated (builds succeed after `FAKE_BUILD_SECONDS`, default 5; deploys export fake URLs). The plugin CLI honours `SLIPWAY_GH_TOKEN` in place of `gh auth token`, so the two can be exercised end to end on a laptop.
+**Fake mode for local development** (`DEPLOYER_FAKE=1`): tokens of the form `fake:<login>` are accepted as org members (except logins starting `outsider`); the owner is `GITHUB_OWNER` (default `acme`), an org; GitHub and the runner are simulated (builds succeed after `FAKE_BUILD_SECONDS`, default 5; deploys export fake URLs). The plugin CLI honours `SLIPWAY_GH_TOKEN` in place of `gh auth token`, so the two can be exercised end to end on a laptop.
 
 Shapes:
 
@@ -264,10 +264,10 @@ type SecretStatus = { set: boolean; lastSetBy: string | null; lastSetAt: string 
 
 | Method and path | Request | Response |
 |---|---|---|
-| `GET /api/whoami` | | `{ "login": "jane" }` |
+| `GET /api/whoami` | | `{ "login": "jane", "owner": "acme", "ownerType": "Organization" \| "User", "codeowners": "@acme/platform" }`. The plugin creates repos under `owner` and fills the template's `__APP_CODEOWNERS__` with `codeowners` |
 | `GET /api/dev-config` | | `{ "clerkPublishableKey": "pk_test_...", "clerkSecretKey": "sk_test_..." }`. Unused since plugin 0.3.0, which doesn't run apps locally |
 | `GET /api/apps/:name` | | `App`, or `404` if not registered |
-| `POST /api/apps` | `{ "name": "my-app" }` (repo is always `acme/<name>`) | `201 App`. `409` if registered, `400` if the name is invalid, the repo is missing, or `app.yaml` on `main` is missing or its `name` differs (the repo and `app.yaml` are retried for a few seconds first, since the plugin calls this right after pushing). The caller's login becomes `owner`. Re-registering an app whose status is `failed` is allowed for its owner and queues the chain again. |
+| `POST /api/apps` | `{ "name": "my-app" }` (repo is always `<owner>/<name>`) | `201 App` plus `"warning": string \| null`. The warning is set when GitHub's plan can't protect the private repo (GitHub Free): the app is registered anyway, with `main` unprotected. `409` if registered, `400` if the name is invalid, the repo is missing, or `app.yaml` on `main` is missing or its `name` differs (the repo and `app.yaml` are retried for a few seconds first, since the plugin calls this right after pushing). The caller's login becomes `owner`. Re-registering an app whose status is `failed` is allowed for its owner and queues the chain again. |
 | `GET /api/apps/:name/pulls/:number` | | `PullRequest` (`status: "unknown"` and `headSha: ""` if the deployer hasn't seen it yet) |
 | `GET /api/apps/:name/jobs?limit=20` | | `{ "jobs": Job[] }` newest first |
 | `GET /api/apps/:name/jobs/:id/log?tail=200` | | `text/plain`, the last `tail` lines of the job's runner log (colleagues have no AWS console access, so logs are served here) |
@@ -314,21 +314,23 @@ Caddyfile
 NODE_ENV=production
 HOST=127.0.0.1
 PORT=3000
-AWS_REGION=ca-west-1
+AWS_REGION=<region>
 DATA_DIR=/var/lib/slipway
-GITHUB_ORG=acme
+GITHUB_OWNER=<owner>
+GITHUB_ALLOWED_USERS=<comma-separated logins, or empty>
+GITHUB_CODEOWNERS=<entry, or empty>
 PUBLIC_URL=https://dxxxx.cloudfront.net
 RUNNER_SOCKET=/run/slipway/runner.sock
 GITHUB_APP_SECRET_ID=slipway/github-app
 CLERK_LOCAL_SECRET_ID=slipway/clerk/local
-ALERTS_TOPIC_ARN=arn:aws:sns:ca-west-1:<account>:slipway-alerts
+ALERTS_TOPIC_ARN=arn:aws:sns:<region>:<account>:slipway-alerts
 ```
 
 - `/etc/slipway/runner.env`:
 
 ```sh
 NODE_ENV=production
-AWS_REGION=ca-west-1
+AWS_REGION=<region>
 AWS_ACCOUNT_ID=<account>
 RELEASES_BUCKET=slipway-artifacts-<account>
 STATE_BUCKET=slipway-tfstate-<account>
@@ -344,5 +346,5 @@ SLIPWAY_HOME=/opt/slipway/current
 
 - **Secret values:** the deployer writes app secrets with `PutParameter` (SecureString, overwrite, no `KeyId`, so the `aws/ssm` key is used). The instance role has no `ssm:GetParameter` on `/apps/*`, so the deployer can't read them back. The runner can't either: it runs under the same role. App task execution roles can.
 - **Failed deploys:** every failed deploy puts the CloudWatch metric `slipway` / `FailedDeploys` with dimension `Env`, and a failed prod deploy also publishes to `ALERTS_TOPIC_ARN`. The foundation creates no alarms, so the topic message is the alert.
-- Extra settings for local runs (not in the instance's env files): `PUBLIC_URL_PARAM` (alternative to `PUBLIC_URL`), `SECRETS_KMS_KEY_ID` (optional key for app secrets), `GITHUB_APP_ID` / `GITHUB_APP_PRIVATE_KEY` / `GITHUB_WEBHOOK_SECRET` (instead of `GITHUB_APP_SECRET_ID`), `GITHUB_APP_SLUG` (default `slipway-deployer`), `WORKER_INTERVAL_SECONDS`, `REGISTER_RETRY_MS`, `DEPLOYER_FAKE`, `FAKE_BUILD_SECONDS`. In fake mode the deployer simulates the runner and needs no socket.
+- Extra settings for local runs (not in the instance's env files): `PUBLIC_URL_PARAM` (alternative to `PUBLIC_URL`), `SECRETS_KMS_KEY_ID` (optional key for app secrets), `GITHUB_APP_ID` / `GITHUB_APP_PRIVATE_KEY` / `GITHUB_WEBHOOK_SECRET` (instead of `GITHUB_APP_SECRET_ID`), `WORKER_INTERVAL_SECONDS`, `REGISTER_RETRY_MS`, `DEPLOYER_FAKE`, `FAKE_BUILD_SECONDS`. In fake mode the deployer simulates the runner and needs no socket.
 - Native modules: `argon2` and `better-sqlite3` ship prebuilt linux-x64 binaries. The deployer's `package.json` `allowScripts` lets argon2's install script run and blocks better-sqlite3's (which would fall back to `node-gyp rebuild`).

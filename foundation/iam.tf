@@ -2,9 +2,9 @@
 # permissions boundary every app role carries, and the Express Mode
 # infrastructure role every app service shares.
 #
-# ca-west-1 is dedicated to slipway, so the instance role may do anything
+# var.region is dedicated to slipway, so the instance role may do anything
 # there. What it can reach outside the region is scoped tightly, because the
-# account runs production elsewhere: IAM (only app-* roles, only with the
+# account may run other things elsewhere: IAM (only app-* roles, only with the
 # boundary), CloudFront (only distributions tagged as slipway apps) and
 # nothing else. Untrusted build steps run as a user that can't reach the
 # instance metadata service, so they get none of this (docs/contracts.md).
@@ -79,7 +79,7 @@ data "aws_iam_policy_document" "boundary" {
 
 resource "aws_iam_policy" "boundary" {
   name        = "slipway-boundary"
-  description = "Permissions boundary for every IAM role an slipway app deploy creates"
+  description = "Permissions boundary for every IAM role a slipway app deploy creates"
   policy      = data.aws_iam_policy_document.boundary.json
 }
 

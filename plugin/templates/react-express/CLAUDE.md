@@ -79,4 +79,4 @@ The plugin's hooks block these edits, and the deployer won't auto-merge a PR tha
 - `.github/` and `CODEOWNERS`.
 - The platform-owned fields in `app.yaml`: `name`, `auth`, `auto_merge`, `sizes`. Leave the `api:` and `web:` sections alone too unless the dev team asks.
 
-This repo holds no Terraform, CI workflows or build scripts. Infrastructure and deploys live in `sameid/slipway`.
+This repo holds no Terraform, CI workflows or build scripts. Infrastructure and deploys live in the slipway platform that runs your deployer (https://github.com/sameid/slipway).

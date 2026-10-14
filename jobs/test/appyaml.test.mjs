@@ -95,11 +95,11 @@ test("renders the env root config with a relative module source and the contract
   const root = renderEnv({
     app: "my-app", env: "prod", inputs: inputsFromConfig(config, "prod"),
     outDir: "/platform/work/my-app-prod", modulesDir: "/platform/modules", stateBucket: "slipway-tfstate-123",
-    versions: VERSIONS,
+    region: "eu-west-1", versions: VERSIONS,
   });
   assert.equal(root.module.env.source, "../../modules/app-env");
   assert.deepEqual(root.terraform.backend.s3, {
-    bucket: "slipway-tfstate-123", key: "apps/my-app/prod.tfstate", region: "ca-west-1", encrypt: true, use_lockfile: true,
+    bucket: "slipway-tfstate-123", key: "apps/my-app/prod.tfstate", region: "eu-west-1", encrypt: true, use_lockfile: true,
   });
   assert.equal(root.terraform.required_providers.aws.version, "6.68.0");
   assert.deepEqual(root.provider.aws.default_tags.tags, { platform: "slipway", app: "my-app", env: "prod" });
@@ -113,7 +113,7 @@ test("renders the env root config with a relative module source and the contract
 test("renders the shared root config", () => {
   const root = renderShared({
     app: "my-app", outDir: "/platform/work/my-app-shared", modulesDir: "/platform/modules", stateBucket: "b",
-    versions: VERSIONS,
+    region: "eu-west-1", versions: VERSIONS,
   });
   assert.equal(root.module.shared.source, "../../modules/app-shared");
   assert.equal(root.terraform.backend.s3.key, "apps/my-app/shared.tfstate");
@@ -136,7 +136,7 @@ test("CLI: validate, get and render-env from a destroy-time inputs file", () => 
     }));
     const out = path.join(dir, "work", "my-app-staging");
     main(["render-env", "--app", "my-app", "--env", "staging", "--inputs-json", inputs, "--out-dir", out,
-      "--modules-dir", path.join(dir, "modules"), "--state-bucket", "b"]);
+      "--modules-dir", path.join(dir, "modules"), "--state-bucket", "b", "--region", "eu-west-1"]);
     const root = JSON.parse(readFileSync(path.join(out, "main.tf.json"), "utf8"));
     assert.equal(root.module.env.size, "large");
     assert.equal(root.module.env.api_port, 8080);

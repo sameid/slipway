@@ -1,5 +1,5 @@
-# Platform-owned files. Changes need dev team approval, and the deployer won't
-# auto-merge a PR that touches them.
-/app.yaml     @acme/dev-team
-/CODEOWNERS   @acme/dev-team
-/.github/     @acme/dev-team
+# Platform-owned files. Changes need review by whoever runs your slipway, and
+# the deployer won't auto-merge a PR that touches them.
+/app.yaml     __APP_CODEOWNERS__
+/CODEOWNERS   __APP_CODEOWNERS__
+/.github/     __APP_CODEOWNERS__

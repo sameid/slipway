@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Publish a release of the deployer instance's software (the deployer, the
 # runner, jobs/ and modules/) and roll it out. Dev team only; needs AWS
-# credentials for the platform account (AWS_PROFILE).
+# credentials for the platform account (AWS_PROFILE) and the foundation's
+# region (AWS_REGION).
 #
 #   1. builds and packs the release (scripts/pack.sh)
 #   2. uploads it to s3://<artifacts bucket>/deployer/<version>.tgz
@@ -19,9 +20,10 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-export AWS_REGION="${AWS_REGION:-ca-west-1}"
 export AWS_PAGER=""
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+[[ -n "${AWS_REGION:-}" ]] || die "Set AWS_REGION to the region the foundation is in (terraform.tfvars: region)"
+export AWS_REGION
 
 for cmd in aws node npm tar; do command -v "$cmd" >/dev/null || die "$cmd is not installed"; done
 

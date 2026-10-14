@@ -66,9 +66,39 @@ describe("plugin API", () => {
       prod: { url: null, release: null, lastDeploy: null },
       activeJobs: [JOB, JOB, JOB],
       recentJobs: [JOB, JOB, JOB],
+      warning: null,
     });
     expect(t.github.repo("acme/loan-tracker")!.protected).toBe(true);
     expect((await api("/api/apps", { body: { name: "loan-tracker" } })).status).toBe(409);
+  });
+
+  it("registers with a warning when the GitHub plan can't protect private repos", async () => {
+    const t = setup();
+    t.github.protectionUnavailable = true;
+    const api = await client(t);
+    const res = await api("/api/apps", { body: { name: "loan-tracker" } });
+    expect(res.status).toBe(201);
+    expect(res.body.warning).toMatch(/doesn't allow branch protection on private repos/);
+    expect(t.github.repo("acme/loan-tracker")!.protected).toBeFalsy();
+    expect(jobsOf(t, "loan-tracker")).toHaveLength(3);
+  });
+
+  it("tells the plugin who owns app repos and who owns platform files", async () => {
+    const personal = setup({ owner: "sam" }, "User");
+    expect((await (await client(personal, "sam"))("/api/whoami")).body).toEqual({
+      login: "sam",
+      owner: "sam",
+      ownerType: "User",
+      codeowners: "@sam",
+    });
+    await close?.();
+
+    const org = setup({ codeowners: "@acme/platform" });
+    expect((await (await client(org))("/api/whoami")).body).toMatchObject({
+      owner: "acme",
+      ownerType: "Organization",
+      codeowners: "@acme/platform",
+    });
   });
 
   it("refuses bad names and repos that don't exist", async () => {

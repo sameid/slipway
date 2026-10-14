@@ -75,7 +75,7 @@ function config(over: Partial<RunnerConfig> = {}): RunnerConfig {
     maxBuilds: 1,
     maxDeploys: 2,
     home: join(dir, "home"),
-    region: "ca-west-1",
+    region: "us-east-1",
     accountId: "123456789012",
     releasesBucket: "slipway-releases-test",
     stateBucket: "slipway-tfstate-test",

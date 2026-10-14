@@ -1,6 +1,6 @@
 # The deployer host (design 5.5, with the runner from docs/contracts.md): one
 # x86_64 instance in a default subnet. pm2 runs the deployer and the runner
-# (builds and deploys, since CodeBuild isn't available in ca-west-1), each as
+# (builds and deploys, so no CodeBuild is needed in any region), each as
 # its own user, and rotates their logs; Caddy listens on 8080 for CloudFront.
 #
 # The instance has a public address, but its security group only lets in
@@ -36,7 +36,9 @@ locals {
     PORT                  = local.deployer_port
     AWS_REGION            = local.region
     DATA_DIR              = "/var/lib/slipway"
-    GITHUB_ORG            = var.github_org
+    GITHUB_OWNER          = var.github_owner
+    GITHUB_ALLOWED_USERS  = join(",", var.github_allowed_users)
+    GITHUB_CODEOWNERS     = var.github_codeowners
     PUBLIC_URL            = "https://${aws_cloudfront_distribution.deployer.domain_name}"
     RUNNER_SOCKET         = "/run/slipway/runner.sock"
     GITHUB_APP_SECRET_ID  = "slipway/github-app"
@@ -58,7 +60,7 @@ locals {
     # Empty: the runner uses the instance role directly, no assumed roles.
     RUNNER_PUBLISH_PROFILE = ""
     RUNNER_DEPLOY_PROFILE  = ""
-    SLIPWAY_HOME          = "/opt/slipway/current"
+    SLIPWAY_HOME           = "/opt/slipway/current"
   }
 
   deployer_user_data = templatefile("${path.module}/templates/user-data.sh.tftpl", {

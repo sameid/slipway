@@ -68,7 +68,7 @@ export function loadRunnerConfig(): RunnerConfig {
     maxBuilds: Number(env("RUNNER_MAX_BUILDS", "1")),
     maxDeploys: Number(env("RUNNER_MAX_DEPLOYS", "2")),
     home: resolve(env("SLIPWAY_HOME", dev ? checkoutRoot() : undefined)),
-    region: env("AWS_REGION", "ca-west-1"),
+    region: aws("AWS_REGION", "us-east-1"),
     accountId: aws("AWS_ACCOUNT_ID", "000000000000"),
     releasesBucket: aws("RELEASES_BUCKET", "slipway-artifacts-dev"),
     stateBucket: aws("STATE_BUCKET", "slipway-tfstate-dev"),

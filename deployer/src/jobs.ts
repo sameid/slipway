@@ -46,7 +46,7 @@ export function getApp(deps: Deps, name: string): AppRow | undefined {
   return deps.db.select().from(apps).where(eq(apps.name, name)).get();
 }
 
-/** Case-insensitive, like GitHub: webhooks spell the org "Acme", apps.repo "acme". */
+/** Case-insensitive, like GitHub: webhooks may spell the owner "Acme", apps.repo "acme". */
 export function getAppByRepo(deps: Deps, repo: string): AppRow | undefined {
   return deps.db
     .select()

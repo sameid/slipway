@@ -3,22 +3,32 @@
 **Status:** Draft v8
 **Owner:** Dev team
 **Last updated:** October 12, 2026
-**Region:** `ca-west-1` (Canada West, Calgary), dedicated to slipway
+**Region:** `ca-west-1` (Canada West, Calgary) for the first deployment; now any region you choose, dedicated to slipway (item 11)
+
+> This design was written for slipway's first deployment: one company's GitHub org and one AWS account in `ca-west-1`. Keep reading it for the reasoning. For the current self-hosted setup (your own GitHub org or personal account, your own AWS account and region), [foundation.md](foundation.md) and [contracts.md](contracts.md) win where they differ. Here, `acme` stands for the GitHub owner that holds app repos, and "the dev team" for whoever runs your slipway.
 
 ## Changes since Draft v7
 
 These changes came out of building the platform and checking the region. Where they conflict with the sections below, this list wins. The exact names, settings and interfaces are in [contracts.md](contracts.md).
 
-1. **No CodeBuild.** AWS CodeBuild (and CodePipeline) isn't available in `ca-west-1`. Builds and deploys run on the deployer instance in a second process, the **runner**, which takes jobs from the deployer over a local Unix socket. Wherever this document says "CodeBuild", "`build-release` project" or "`deploy-env` project", read "the runner's `build-release` or `deploy-env` job".
+1. **No CodeBuild.** AWS CodeBuild (and CodePipeline) isn't available in `ca-west-1`. Builds and deploys run on the deployer instance in a second process, the **runner**, which takes jobs from the deployer over a local Unix socket. Wherever this document says "CodeBuild", "`build-release` project" or "`deploy-env` project", read "the runner's `build-release` or `deploy-env` job". The runner works in every region, so it stays wherever slipway runs.
 2. **Isolation on the box.** The deployer, the runner and untrusted build steps run as three Linux users. Anything that executes app code (`npm ci`, type check, lint, tests, frontend build) runs as `slipway-build`, which can't reach the instance's AWS credentials, the deployer's data or its port. Docker image builds and Terraform run as the runner.
-3. **The deployer holds deploy permissions.** Section 7's "the deployer holds the least AWS power" no longer holds: the instance role can do anything in `ca-west-1` (the region is dedicated to slipway). It can manage only slipway's own resources in the global services (IAM, CloudFront, S3). Roles that app deploys create still carry the `slipway-boundary` permissions boundary. Isolation now rests on untrusted code running without credentials.
+3. **The deployer holds deploy permissions.** Section 7's "the deployer holds the least AWS power" no longer holds: the instance role can do anything in its region (the region is dedicated to slipway). It can manage only slipway's own resources in the global services (IAM, CloudFront, S3). Roles that app deploys create still carry the `slipway-boundary` permissions boundary. Isolation now rests on untrusted code running without credentials.
 4. **Deployer hosting.** One `t3.small` (x86_64, because it builds `linux/amd64` images) in a public subnet of the default VPC, with an Elastic IP. pm2 runs the deployer and the runner and rotates their logs (pm2-logrotate); Caddy listens on port 8080. CloudFront stays in front for HTTPS. The instance accepts traffic only from CloudFront's origin-facing IP ranges, and Caddy rejects requests without CloudFront's secret origin header. The CloudFront-to-instance hop is plain HTTP. No private subnets, no NAT gateway, no VPC origin.
 5. **Lean foundation.** The default VPC replaces the custom one. One artifacts bucket holds app releases and deployer releases. The AWS-managed `aws/ssm` key replaces the platform KMS key: the deployer still can't read secret values, because it has no `ssm:GetParameter` on `/apps/*`. Platform secrets (one per Clerk application holding both of its keys, and the GitHub App) are created by hand when their values exist, not by Terraform. Parameter Store holds only app secrets. Per-app modules find shared resources by naming convention.
-6. **Database classes.** RDS in `ca-west-1` offers no `db.t4g` classes for Postgres. The size presets use `db.t3.micro`, `db.t3.small` and `db.t3.medium`.
+6. **Database classes.** RDS in `ca-west-1` offers no `db.t4g` classes for Postgres. The size presets use `db.t3.micro`, `db.t3.small` and `db.t3.medium`, in every region.
 7. **App images are x86.** The Terraform resource for Express Mode has no CPU architecture setting, so app tasks run on X86_64, not Graviton.
 8. **No Litestream, no deployer backups yet.** The deployer's SQLite database lives only on the instance's EBS volume. EC2's automatic recovery keeps the volume, but replacing or terminating the instance loses the dashboard accounts, the app registry and job history (apps keep running). EBS snapshots will be added later. Until then, wherever this document mentions Litestream, there is no replication.
-9. **Known open risk: the GitHub App sees every repo in the org.** `slipway-deployer` is installed on all repositories in the org. Anyone who compromises the deployer instance gets write access to their contents and settings, so use an org (or account) that holds only slipway apps. The plan is to narrow this later. One option: drop the Administration and Members permissions, install on selected repositories, and have `/new-app` add each app repo and set its branch protection with the colleague's own `gh` login. Another: a separate GitHub org for slipway apps.
-10. **Names.** The product is slipway; Acme is the company and GitHub org. The GitHub App is `slipway-deployer`. Commit statuses are `slipway/check` and `slipway/deploy-*`. The stack skill is `slipway-stack`. The Clerk applications are `slipway-local`, `slipway-stage` and `slipway-production`. The plugin marketplace is `slipway`.
+9. **Known open risk: the GitHub App sees every repo of its owner.** The deployer's App is installed on all repositories of the org or personal account that owns app repos. Anyone who compromises the deployer instance gets write access to their contents and settings, so use an org (or account) that holds only slipway apps. The plan is to narrow this later. One option: drop the Administration and Members permissions, install on selected repositories, and have `/new-app` add each app repo and set its branch protection with the colleague's own `gh` login. Another: a separate GitHub org for slipway apps.
+10. **Names.** The product is slipway. Each install creates its own GitHub App with a name of its choosing (App names are unique across GitHub; for example `slipway-<owner>`), and its own Clerk applications (suggested: `slipway-local`, `slipway-stage`, `slipway-production`). Commit statuses are `slipway/check` and `slipway/deploy-*`. The stack skill is `slipway-stack`. The plugin marketplace is `slipway`.
+11. **Bring your own GitHub and AWS.** slipway is self-hosted: anyone runs it in their own AWS account and on their own GitHub org or personal account.
+    - **Owner.** `github_owner` names the org or personal account that owns app repos. The deployer finds its App's installation on it as an org or as a user, and asks GitHub for its own slug (`GET /app`) instead of being configured with it.
+    - **Access.** In an org, plugin API access is org membership, as before. On a personal account, it's the owner plus `github_allowed_users`; only the owner can run `/new-app`, because nobody else can create repos there.
+    - **Branch protection.** Push restrictions (only the App may push to `main`) are set on org repos only; GitHub has none for personal repos. GitHub Free can't protect private repos at all: registration then succeeds with a warning and `main` stays unprotected.
+    - **CODEOWNERS.** New apps get `github_codeowners`, or by default the owner (personal account) or the app's creator (org), instead of a fixed team.
+    - **Region.** Required everywhere (Terraform, the deployer, the runner, `release.sh`), with no default. It must still be dedicated to slipway; a dedicated AWS account is best.
+    - **Plugin setup.** The plugin has no built-in org or deployer URL. Each colleague runs `/setup <deployer URL>` once, which saves it in `~/.config/slipway/config.json`; the plugin learns the owner and the CODEOWNERS entry from `GET /api/whoami`.
+    - **One repo.** The platform and the plugin live in one repo: infrastructure at the root, the plugin in `plugin/`, the marketplace at the root.
 
 ## 1. Summary
 
@@ -38,7 +48,7 @@ Agents write code and open pull requests. They never deploy. All builds and depl
 - Identical staging and prod environments, with prod getting the exact build that was tested on staging.
 - The dev team controls all infrastructure and all deploy logic.
 - Infrastructure simple enough for a small team to run: one deployer process on one box, managed services for everything else.
-- All app data stays in Canada (`ca-west-1`).
+- All app data stays in one region (`ca-west-1` for the first deployment).
 
 **Non-goals (for now)**
 
@@ -54,7 +64,7 @@ Agents write code and open pull requests. They never deploy. All builds and depl
 1. Install the plugin once: `/plugin marketplace add sameid/slipway`, then install `slipway`.
 2. Run `/new-app`. Answer three questions: app name, template, one-line description.
 3. The plugin creates `acme/<name>` on GitHub from the template, registers it with the deployer, and waits.
-4. About 10–15 minutes later (mostly RDS creating the database), the plugin prints the staging link. Opening it shows a Clerk sign-in screen; signing in with a company email works immediately.
+4. About 10–15 minutes later (mostly RDS creating the database), the plugin prints the staging link. Opening it shows a Clerk sign-in screen; signing in with an email Clerk allows works immediately.
 5. Build features with Claude Code. Nothing runs on the laptop: every change is previewed on staging. `/ship` commits to a branch and opens a PR. Once the checks pass, the deployer merges it and deploys staging. `/ship` waits and prints the updated staging link.
 6. `/status` shows what's on staging and prod.
 7. When ready for prod, sign in to the deployer dashboard and press Promote.
@@ -84,12 +94,12 @@ flowchart TD
     ECS -->|verify session JWT via JWKS| CLERK
 ```
 
-There are two platform repos, plus one repo per app:
+There's one platform repo (originally two), plus one repo per app:
 
 | Repo | Owner | Contents |
 |---|---|---|
-| `sameid/slipway` | Dev team | Foundation Terraform, the per-app Terraform module, CodeBuild buildspecs, deployer source |
-| `sameid/slipway` | Dev team | The Claude Code plugin and app templates |
+| `sameid/slipway` (root) | Dev team | Foundation Terraform, the per-app Terraform module, CodeBuild buildspecs, deployer source |
+| `sameid/slipway` (`plugin/`) | Dev team | The Claude Code plugin and app templates |
 | `acme/<app-name>` | Colleague | App code and `app.yaml` |
 
 ## 5. Components
@@ -318,7 +328,7 @@ Every resource is named `app-<name>-<env>-<resource>` and tagged `platform=slipw
 
 ### 5.4 Shared foundation
 
-Created once by the dev team from `sameid/slipway/foundation/`, all in `ca-west-1` except where noted:
+Created once by the dev team from `foundation/`, all in `ca-west-1` except where noted:
 
 - **VPC** with public and private subnets across two availability zones, and NAT for outbound traffic from private subnets.
 - **Terraform state bucket** with versioning, encryption, and S3-native locking (`use_lockfile = true`, Terraform ≥ 1.10).
@@ -354,8 +364,8 @@ To keep `/new-app` free of any Clerk setup, all apps share three Clerk applicati
 
 Configuration for each Clerk application:
 
-- Sign-in with Google and email, restricted to the company email domain (Clerk's allowlist).
-- Sign-up open to anyone on the allowed domain, so colleagues can use any app immediately.
+- Sign-in with Google and email, restricted with Clerk's allowlist (your email domain, or a list of addresses).
+- Sign-up open to anyone the allowlist admits, so colleagues can use any app immediately.
 
 Sharing an application per environment means one sign-in works across every app in that environment, and adding an app needs no Clerk changes. The trade-offs are that the 100-user cap and the Backend API rate limit are shared by all apps in that environment, and any colleague can sign in to any app. Apps must do their own authorization.
 
@@ -379,7 +389,7 @@ A single Node.js process on one EC2 instance. It serves the dashboard, the plugi
 | AWS | `@aws-sdk/client-codebuild`, `@aws-sdk/client-s3`, `@aws-sdk/client-secrets-manager` |
 | Process manager | `systemd`: one unit for the deployer, one for Litestream |
 
-**Repo layout** (`sameid/slipway/deployer/`)
+**Repo layout** (`deployer/`)
 
 ```
 deployer/
@@ -551,7 +561,7 @@ GitHub does not automatically retry failed webhook deliveries. On every start, t
 
 *Plugin API: GitHub token*
 
-The plugin sends the colleague's `gh auth token`. The deployer checks it with GitHub, confirms the user is a member of the `acme` org, and caches the result for 10 minutes. Colleagues set up nothing extra. The plugin API can register apps, read status, fetch local-development config and request teardown, but cannot promote.
+The plugin sends the colleague's `gh auth token`. The deployer checks it with GitHub, confirms the user is a member of the `acme` org (on a personal account: the owner or an allowed user, item 11), and caches the result for 10 minutes. Colleagues set up nothing extra. The plugin API can register apps, read status, fetch local-development config and request teardown, but cannot promote.
 
 **API**
 
@@ -750,7 +760,7 @@ Any signed-in user picks an earlier release that succeeded and deploys it to sta
 | Identity | Can do | Cannot do |
 |---|---|---|
 | Colleague / their Claude Code | Push branches, open PRs in their app repo | Push to `main`, change deploy logic, access AWS, see staging or prod Clerk secrets |
-| App user (via Clerk) | Sign in to any app in an environment with a company email | Anything the app's own authorization doesn't allow |
+| App user (via Clerk) | Sign in to any app in an environment with an email Clerk allows | Anything the app's own authorization doesn't allow |
 | Dashboard user | Promote, roll back, confirm teardown | Change infrastructure or build steps |
 | Dashboard admin | Everything a user can, plus manage accounts | Same as above |
 | Deployer GitHub App | Download source, merge PRs with a passing check, set branch protection, post statuses and comments | Bypass its own check logic (enforced by code review of the deployer) |
@@ -811,7 +821,7 @@ Platform overhead is small:
 ## 11. Rollout plan
 
 1. **Region check and foundation**: confirm service availability in `ca-west-1`, then build the VPC, the state, sources and artifact buckets, and both CodeBuild projects and their roles.
-2. **Clerk**: create the three Clerk applications, restrict them to the company email domain, and store their keys in Secrets Manager and SSM.
+2. **Clerk**: create the three Clerk applications, restrict who can sign in, and store their keys in Secrets Manager and SSM.
 3. **Template and one app by hand**: the `react-express` template with Clerk, the per-app Terraform module and buildspecs. Upload a source zip and start `build-release` and `deploy-env` manually to get one app to staging and prod, and sign in on both.
 4. **Deployer core**: Express server, SQLite with Drizzle, GitHub App, webhooks, worker loop, Litestream, systemd units. Merges deploy staging automatically.
 5. **Auto-merge**: `check` builds on PRs, branch protection on registration, merge on success.

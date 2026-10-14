@@ -1,5 +1,5 @@
 // Client for the deployer's plugin API (see docs/contracts.md).
-import { config, deployerUrl, githubToken } from "./config.mjs";
+import { deployerUrl, githubToken } from "./config.mjs";
 import { CliError } from "./util.mjs";
 
 export class ApiError extends CliError {
@@ -46,9 +46,11 @@ function explain(status, raw) {
     message = raw.trim().slice(0, 300);
   }
   if (status === 401) return `${message || "invalid GitHub token"}. Run: gh auth login`;
-  if (status === 403 && !message) return `You need to be a member of the ${config().org} GitHub org.`;
+  if (status === 403 && !message) return "The deployer doesn't let your GitHub account use it.";
   return message || `The deployer answered HTTP ${status}.`;
 }
+
+let me;
 
 export const api = {
   get: (path) => request("GET", path),
@@ -56,6 +58,15 @@ export const api = {
   text: (path) => request("GET", path, { text: true }),
 
   whoami: () => request("GET", "/api/whoami"),
+
+  // whoami, once per process: { login, owner, ownerType, codeowners }.
+  me() {
+    me ??= request("GET", "/api/whoami").catch((err) => {
+      me = undefined;
+      throw err;
+    });
+    return me;
+  },
 
   // The app, or null if the deployer has never heard of it.
   async app(name) {

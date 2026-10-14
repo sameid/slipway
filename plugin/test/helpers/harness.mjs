@@ -71,6 +71,8 @@ esac
   return { bin, log };
 }
 
+const NO_CONFIG = path.join(tmpdir(), "slipway-test-no-config");
+
 export const GIT_ENV = {
   GIT_AUTHOR_NAME: "Test",
   GIT_AUTHOR_EMAIL: "test@example.com",
@@ -79,7 +81,7 @@ export const GIT_ENV = {
   GIT_CONFIG_NOSYSTEM: "1",
 };
 
-// A git repo that looks like an slipway app.
+// A git repo that looks like a slipway app.
 export function appRepo(dir, { name = "loan-tracker", secrets = [] } = {}) {
   mkdirSync(dir, { recursive: true });
   execFileSync("git", ["init", "--quiet", "--initial-branch=main"], { cwd: dir });
@@ -112,7 +114,8 @@ export function runCli(args, { cwd = ROOT, env = {}, input } = {}) {
   return new Promise((resolve) => {
     const child = spawn(process.execPath, [CLI, ...args], {
       cwd,
-      env: { ...process.env, ...GIT_ENV, SLIPWAY_GH_TOKEN: "fake:alice", ...env },
+      // XDG_CONFIG_HOME: never read the developer's own `slipway setup` config.
+      env: { ...process.env, ...GIT_ENV, XDG_CONFIG_HOME: NO_CONFIG, SLIPWAY_GH_TOKEN: "fake:alice", ...env },
     });
     let stdout = "";
     let stderr = "";

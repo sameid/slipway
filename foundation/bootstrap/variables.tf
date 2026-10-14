@@ -1,5 +1,4 @@
 variable "region" {
-  description = "Region for the state bucket. Keep it with everything else."
+  description = "Region for the state bucket: the same region as the foundation."
   type        = string
-  default     = "ca-west-1"
 }

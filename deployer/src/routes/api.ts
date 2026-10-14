@@ -45,9 +45,20 @@ export function apiRoutes(deps: Deps): express.Router {
     return app;
   };
 
+  // Who the caller is, and what the plugin needs to create apps: the account
+  // that owns app repos and the CODEOWNERS entry for platform-owned files.
   router.get(
     "/whoami",
-    route(deps, (req, res) => res.json({ login: req.login })),
+    route(deps, async (req, res) => {
+      const { owner, codeowners } = deps.config;
+      const ownerType = await deps.github.ownerType();
+      res.json({
+        login: req.login,
+        owner,
+        ownerType,
+        codeowners: codeowners ?? `@${ownerType === "User" ? owner : req.login}`,
+      });
+    }),
   );
 
   router.get(
@@ -68,8 +79,8 @@ export function apiRoutes(deps: Deps): express.Router {
     "/apps",
     route(deps, async (req, res) => {
       const name = typeof req.body?.name === "string" ? req.body.name : "";
-      const app = await registerApp(deps, name, req.login!);
-      res.status(201).json(appJson(deps, app));
+      const { app, warning } = await registerApp(deps, name, req.login!);
+      res.status(201).json({ ...appJson(deps, app), warning });
     }),
   );
 

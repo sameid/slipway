@@ -18,11 +18,11 @@ export function invalidAppName(name: string): string | null {
   return null;
 }
 
-export const repoFor = (org: string, app: string) => `${org}/${app}`;
-/** GitHub owner and repo names are case-insensitive: webhooks spell the org "Acme", apps.repo "acme". */
+export const repoFor = (owner: string, app: string) => `${owner}/${app}`;
+/** GitHub owner and repo names are case-insensitive: webhooks may spell the owner "Acme", apps.repo "acme". */
 export const sameRepo = (a: string | null | undefined, b: string | null | undefined) =>
   !!a && !!b && a.toLowerCase() === b.toLowerCase();
-// Commit status contexts carry the product's name, not the org's.
+// Commit status contexts carry the product's name, not the owner's.
 export const CHECK_CONTEXT = "slipway/check";
 export const deployContext = (env: AppEnv) => `slipway/deploy-${env}`;
 export const shortSha = (sha: string) => sha.slice(0, 7);

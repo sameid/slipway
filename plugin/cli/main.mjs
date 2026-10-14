@@ -2,7 +2,7 @@
 // plus the mechanical parts of /new-app. Zero dependencies; Node 24.
 import { parseArgs } from "node:util";
 import { appName } from "./app.mjs";
-import { config } from "./config.mjs";
+import { config, saveDeployerUrl } from "./config.mjs";
 import { api } from "./deployer.mjs";
 import { checkName, newApp, register, templates } from "./new-app.mjs";
 import { secret } from "./secret.mjs";
@@ -15,7 +15,7 @@ Usage: slipway <command> [options]
 
 Apps
   new-app --name <name> --description <text> [--template react-express] [--dir <parent>] [--local-only]
-                          copy the template, create acme/<name>, register it
+                          copy the template, create <owner>/<name>, register it
   check-name <name>       is the name valid and free?
   templates               list templates
   register                register an already-pushed repo with the deployer
@@ -35,7 +35,8 @@ Secrets (values are only ever typed into a browser page)
   secret wait <link-id>
 
 Other
-  whoami                  your GitHub login as the deployer sees it
+  setup --deployer-url <url>        save your deployer's URL (in ~/.config/slipway/config.json)
+  whoami                  your GitHub login and the account that owns app repos
 
 Options
   --app <name>            app to act on (default: name in app.yaml at the git root)
@@ -46,7 +47,8 @@ Options
 Exit codes: 0 done, 1 error, 2 usage, 3 failed, 4 blocked (PR won't auto-merge),
 10 still waiting (run the same command again).
 
-Config: SLIPWAY_DEPLOYER_URL or deployerUrl in slipway.config.json; SLIPWAY_GH_TOKEN or gh auth token.`;
+Config: SLIPWAY_DEPLOYER_URL, else slipway setup's config file, else deployerUrl in the plugin's
+slipway.config.json; SLIPWAY_GH_TOKEN or gh auth token.`;
 
 const OPTIONS = {
   app: { type: "string" },
@@ -57,6 +59,7 @@ const OPTIONS = {
   template: { type: "string" },
   dir: { type: "string" },
   "local-only": { type: "boolean" },
+  "deployer-url": { type: "string" },
   "max-seconds": { type: "string" },
   interval: { type: "string" },
   head: { type: "string" },
@@ -80,13 +83,37 @@ const COMMANDS = {
   log,
   secret,
   destroy,
+  setup,
   whoami,
 };
 
 async function whoami(opts) {
   const me = await api.whoami();
   if (opts.json) return printJson({ ...me, deployerUrl: config().deployerUrl });
-  print(`${me.login} on ${config().deployerUrl}`);
+  print(`${me.login} on ${config().deployerUrl} (apps are created under ${me.owner})`);
+}
+
+// Save the URL first, so a sign-in problem doesn't lose it; then check it works.
+async function setup(opts, [positional] = []) {
+  const raw = (opts["deployer-url"] ?? positional ?? "").trim();
+  let url;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new CliError("Give the deployer's URL: slipway setup --deployer-url https://dxxxx.cloudfront.net", EXIT.USAGE);
+  }
+  const local = ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
+  if (url.protocol !== "https:" && !(local && url.protocol === "http:")) {
+    throw new CliError("The deployer's URL must start with https:// (http:// only for localhost).", EXIT.USAGE);
+  }
+  const file = saveDeployerUrl(url.origin);
+  if (process.env.SLIPWAY_DEPLOYER_URL && process.env.SLIPWAY_DEPLOYER_URL !== url.origin) {
+    print(`Note: SLIPWAY_DEPLOYER_URL is set and overrides the saved URL.`);
+  }
+  print(`Saved ${url.origin} in ${file}`);
+  const me = await api.whoami();
+  if (opts.json) return printJson({ ...me, deployerUrl: config().deployerUrl, configFile: file });
+  print(`Signed in as ${me.login}. New apps are created under ${me.owner} on GitHub.`);
 }
 
 async function destroy(opts) {

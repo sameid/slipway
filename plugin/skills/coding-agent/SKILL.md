@@ -1,6 +1,6 @@
 ---
 name: coding-agent
-description: Gives every feature, bug fix or enhancement in an slipway app its own git worktree and branch, and runs several at once as background agents when one request asks for more than one thing. Use whenever the colleague asks you to build, add, change or fix something in a repo with an app.yaml that has a template key, before editing any file.
+description: Gives every feature, bug fix or enhancement in a slipway app its own git worktree and branch, and runs several at once as background agents when one request asks for more than one thing. Use whenever the colleague asks you to build, add, change or fix something in a repo with an app.yaml that has a template key, before editing any file.
 ---
 
 # One worktree per task

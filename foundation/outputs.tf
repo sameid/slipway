@@ -1,5 +1,5 @@
 output "deployer_url" {
-  description = "Plugin API, dashboard and GitHub webhook base URL. Put it in the plugin's slipway.config.json."
+  description = "Plugin API, dashboard and GitHub webhook base URL. Each colleague runs /setup with it in Claude Code."
   value       = "https://${aws_cloudfront_distribution.deployer.domain_name}"
 }
 

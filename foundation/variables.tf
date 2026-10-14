@@ -1,13 +1,23 @@
 variable "region" {
-  description = "Dedicated to slipway. Everything except CloudFront lives here."
+  description = "Dedicated to slipway: the deployer's role may do anything in it, so nothing else should run there (ideally use an account just for slipway). Everything except CloudFront and IAM lives here."
   type        = string
-  default     = "ca-west-1"
 }
 
-variable "github_org" {
-  description = "GitHub org the deployer serves."
+variable "github_owner" {
+  description = "GitHub org or personal account that owns every app repo. The deployer's GitHub App is installed on it."
   type        = string
-  default     = "acme"
+}
+
+variable "github_allowed_users" {
+  description = "Personal-account owners only: other GitHub logins allowed to use the plugin API. In an org, membership decides instead. They also need write access to the app repos."
+  type        = list(string)
+  default     = []
+}
+
+variable "github_codeowners" {
+  description = "CODEOWNERS entry for platform-owned files in new apps, e.g. \"@my-org/platform\". Empty: the owner on a personal account, the app's creator in an org."
+  type        = string
+  default     = ""
 }
 
 variable "alert_email" {

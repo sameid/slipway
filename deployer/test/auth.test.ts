@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { PluginAuth, CACHE_MS } from "../src/auth/plugin-auth.js";
+import { AppNotInstalled } from "../src/github.js";
 import { EMAIL_LIMIT, IP_LIMIT } from "../src/auth/ratelimit.js";
 import { addUser, Browser, serve, setup } from "./helpers.js";
 
@@ -28,6 +29,30 @@ describe("plugin API auth", () => {
     expect(member).toHaveBeenCalledTimes(3);
   });
 
+  it("on a personal account, allows only the owner and the allowed users", async () => {
+    const t = setup({ owner: "sam", allowedUsers: ["bob"] }, "User");
+    const auth = new PluginAuth(t.deps);
+    const member = vi.spyOn(t.github, "isOrgMember");
+
+    expect(await auth.check("fake:Sam")).toEqual({ login: "Sam" });
+    expect(await auth.check("fake:bob")).toEqual({ login: "bob" });
+    expect(await auth.check("fake:alice")).toEqual({
+      status: 403,
+      error: "alice isn't allowed to use this deployer: ask sam to add you to its allowed users",
+    });
+    expect(member).not.toHaveBeenCalled();
+  });
+
+  it("says so when the GitHub App isn't installed on the owner", async () => {
+    const t = setup();
+    vi.spyOn(t.github, "ownerType").mockRejectedValue(new AppNotInstalled("The deployer's GitHub App isn't installed on acme"));
+    const s = await serve(t);
+    close = s.close;
+    const res = await fetch(`${s.url}/api/whoami`, { headers: { authorization: "Bearer fake:alice" } });
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ error: "The deployer's GitHub App isn't installed on acme" });
+  });
+
   it("needs a bearer token on every /api route", async () => {
     const t = setup();
     const s = await serve(t);
@@ -36,7 +61,7 @@ describe("plugin API auth", () => {
     expect(res.status).toBe(401);
     expect(await res.json()).toMatchObject({ error: expect.stringContaining("gh auth token") });
     const ok = await fetch(`${s.url}/api/whoami`, { headers: { authorization: "Bearer fake:alice" } });
-    expect(await ok.json()).toEqual({ login: "alice" });
+    expect(await ok.json()).toEqual({ login: "alice", owner: "acme", ownerType: "Organization", codeowners: "@alice" });
   });
 });
 

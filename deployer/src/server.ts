@@ -23,7 +23,7 @@ let deps: Deps;
 let fakeGithub: FakeGitHub | undefined;
 if (config.fake) {
   const publicUrl = config.publicUrl!;
-  fakeGithub = new FakeGitHub(config.org);
+  fakeGithub = new FakeGitHub(config.owner, config.fakeOwnerType);
   deps = {
     db,
     config,
@@ -45,7 +45,7 @@ if (config.fake) {
   deps = {
     db,
     config,
-    github: new OctokitGitHub({ ...app, org: config.org, appSlug: config.appSlug }),
+    github: new OctokitGitHub({ ...app, owner: config.owner }),
     runs: new SocketRuns(config.runnerSocket),
     platform: new AwsPlatform({
       region: config.region,

@@ -12,8 +12,8 @@ locals {
   is_prod = var.env == "prod"
 
   # Sizes from app.yaml (design 5.2). Express Mode runs X86_64 only: the
-  # provider has no CPU architecture argument (docs/contracts.md). RDS in
-  # ca-west-1 offers no db.t4g classes for Postgres, so the presets use db.t3.
+  # provider has no CPU architecture argument (docs/contracts.md). The presets use
+  # db.t3, which every region offers (some, like ca-west-1, have no db.t4g).
   sizes = {
     small  = { cpu = 256, memory = 512, db_class = "db.t3.micro", db_storage = 20, min_tasks = 1, max_tasks = 2 }
     medium = { cpu = 512, memory = 1024, db_class = "db.t3.small", db_storage = 50, min_tasks = 1, max_tasks = 3 }
@@ -27,7 +27,7 @@ locals {
   account_id = data.aws_caller_identity.current.account_id
   region     = data.aws_region.current.region
 
-  # ca-west-1 is dedicated to slipway; everything runs in its default VPC.
+  # The region is dedicated to slipway; everything runs in its default VPC.
   subnet_ids = sort(data.aws_subnets.default.ids)
 
   # Foundation resources, by name (foundation/).
@@ -429,7 +429,7 @@ resource "aws_ecs_express_gateway_service" "api" {
 }
 
 locals {
-  # Endpoint looks like https://<service>.ecs.ca-west-1.on.aws/; CloudFront wants the bare host.
+  # Endpoint looks like https://<service>.ecs.<region>.on.aws/; CloudFront wants the bare host.
   express_endpoint = local.create_service ? aws_ecs_express_gateway_service.api[0].ingress_paths[0].endpoint : ""
   express_host     = local.create_service ? regex("^(?:https?://)?([^/]+)", local.express_endpoint)[0] : ""
 }

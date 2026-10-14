@@ -10,7 +10,7 @@ import {
 } from "node:fs";
 import path from "node:path";
 import { appName, nameProblem } from "./app.mjs";
-import { config, PLUGIN_ROOT } from "./config.mjs";
+import { PLUGIN_ROOT } from "./config.mjs";
 import { api } from "./deployer.mjs";
 import { CliError, EXIT, print, printJson, run, runOrThrow } from "./util.mjs";
 
@@ -36,7 +36,7 @@ async function nameTaken(name) {
   const problem = nameProblem(name);
   if (problem) return problem;
   if (await api.app(name)) return `"${name}" is already registered with the deployer.`;
-  const repo = `${config().org}/${name}`;
+  const repo = `${(await api.me()).owner}/${name}`;
   const view = run("gh", ["repo", "view", repo, "--json", "name"]);
   if (view.status === 0) return `The GitHub repo ${repo} already exists.`;
   return null;
@@ -70,11 +70,12 @@ export function copyTemplate(from, to, values) {
   }
 }
 
-// Replace __APP_NAME__, __APP_DESCRIPTION__ and __APP_OWNER__. Names and GitHub logins
-// are safe anywhere; the description is free text, so it's escaped for its context.
+// Replace __APP_NAME__, __APP_DESCRIPTION__, __APP_OWNER__ and __APP_CODEOWNERS__. Names,
+// GitHub logins and CODEOWNERS entries are safe anywhere; the description is free text,
+// so it's escaped for its context.
 export function fillPlaceholders(text, fileName, values) {
   const ext = path.extname(fileName).toLowerCase();
-  return text.replace(/(["']?)__APP_(NAME|DESCRIPTION|OWNER)__(["']?)/g, (_, open, key, close) => {
+  return text.replace(/(["']?)__APP_(NAME|DESCRIPTION|OWNER|CODEOWNERS)__(["']?)/g, (_, open, key, close) => {
     const value = values[key];
     if (key !== "DESCRIPTION") return `${open}${value}${close}`;
     if (open === '"' || close === '"') return `${open}${JSON.stringify(value).slice(1, -1)}${close}`;
@@ -113,15 +114,14 @@ export async function newApp(opts) {
   }
   const target = path.resolve(opts.dir ?? process.cwd(), name);
   if (existsSync(target)) throw new CliError(`${target} already exists.`, EXIT.USAGE);
-  const org = config().org;
   const localOnly = Boolean(opts["local-only"]);
 
-  const { login } = await api.whoami();
+  const { login, owner, codeowners } = await api.me();
   const taken = await nameTaken(name);
   if (taken) throw new CliError(taken, EXIT.FAILED);
 
   print(`Creating ${target} from the ${template} template`);
-  copyTemplate(templateDir, target, { NAME: name, DESCRIPTION: description, OWNER: login });
+  copyTemplate(templateDir, target, { NAME: name, DESCRIPTION: description, OWNER: login, CODEOWNERS: codeowners });
 
   runOrThrow("git", ["init", "--quiet", "--initial-branch=main"], { cwd: target });
   runOrThrow("git", ["add", "--all"], { cwd: target });
@@ -132,7 +132,7 @@ export async function newApp(opts) {
     "git commit (if git doesn't know who you are, run: git config --global user.name/user.email)",
   );
 
-  const repo = `${org}/${name}`;
+  const repo = `${owner}/${name}`;
   const result = { name, path: target, repo, repoUrl: `https://github.com/${repo}`, app: null };
   if (localOnly) {
     print(`Created ${target} locally. Nothing was pushed or registered (--local-only).`);
@@ -158,6 +158,7 @@ export async function newApp(opts) {
     );
   }
   if (opts.json) return printJson(result);
+  if (result.app?.warning) print("", `Warning: ${result.app.warning}`);
   print(
     "",
     `Created ${result.repoUrl}`,
@@ -170,5 +171,6 @@ export async function register(opts) {
   const name = appName(opts);
   const app = await api.post("/api/apps", { name });
   if (opts.json) return printJson(app);
+  if (app.warning) print(`Warning: ${app.warning}`);
   print(`Registered ${name}. Follow staging with: slipway wait-app --app ${name}`);
 }

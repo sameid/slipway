@@ -18,7 +18,9 @@ source "$JOBS_DIR/versions.env"
 
 DEV="${SLIPWAY_DEV:-}" # set by the runner in dev mode (RUNNER_DEV=1, a laptop)
 EXPORTS_FILE="${SLIPWAY_EXPORTS:-/dev/null}"
-export AWS_REGION="${AWS_REGION:-ca-west-1}"
+# The runner sets AWS_REGION from the foundation (runner.env).
+: "${AWS_REGION:?AWS_REGION must be set}"
+export AWS_REGION
 export AWS_PAGER=""
 export TF_IN_AUTOMATION=1
 export NPM_CONFIG_UPDATE_NOTIFIER=false

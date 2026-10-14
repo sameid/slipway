@@ -1,4 +1,4 @@
-// Everything the deployer does on GitHub, as the slipway-deployer App
+// Everything the deployer does on GitHub, as the deployer's GitHub App
 // (design 5.5 "GitHub App"). The interface lets tests and fake mode swap in an
 // in-memory GitHub.
 import { App } from "@octokit/app";
@@ -27,9 +27,20 @@ export type CommitStatus = {
 
 export type MergeResult = { merged: true; sha: string } | { merged: false; reason: string };
 
+/** What kind of GitHub account owns the app repos. */
+export type OwnerType = "Organization" | "User";
+
+/** GitHub refused branch protection because of the account's plan (private repos on GitHub Free). */
+export class ProtectionUnavailable extends Error {}
+
+/** The deployer's GitHub App has no installation on GITHUB_OWNER. */
+export class AppNotInstalled extends Error {}
+
 export interface GitHub {
   /** The login behind a user's token (`gh auth token`), or null if GitHub rejects it. */
   loginForToken(token: string): Promise<string | null>;
+  ownerType(): Promise<OwnerType>;
+  /** Only asked when the owner is an organization. */
   isOrgMember(login: string): Promise<boolean>;
   repoExists(repo: string): Promise<boolean>;
   branchHead(repo: string, branch: string): Promise<string>;
@@ -46,6 +57,7 @@ export interface GitHub {
   updateBranch(repo: string, number: number, expectedHeadSha: string): Promise<"updated" | "conflict">;
   squashMerge(repo: string, number: number, headSha: string, title: string): Promise<MergeResult>;
   deleteBranch(repo: string, branch: string): Promise<void>;
+  /** Throws ProtectionUnavailable when the account's plan doesn't allow it. */
   protectMain(repo: string): Promise<void>;
   archiveRepo(repo: string): Promise<void>;
   verifyWebhook(payload: string, signature: string): Promise<boolean>;
@@ -90,13 +102,14 @@ function toPull(p: PullData): PullInfo {
   };
 }
 
+type Installation = { octokit: InstallationOctokit; ownerType: OwnerType };
+
 export class OctokitGitHub implements GitHub {
   private app: App;
-  private installation?: Promise<InstallationOctokit>;
+  private installation?: Promise<Installation>;
+  private slug?: Promise<string>;
 
-  constructor(
-    private opts: { appId: string; privateKey: string; webhookSecret: string; org: string; appSlug: string },
-  ) {
+  constructor(private opts: { appId: string; privateKey: string; webhookSecret: string; owner: string }) {
     this.app = new App({
       appId: opts.appId,
       privateKey: opts.privateKey,
@@ -104,16 +117,51 @@ export class OctokitGitHub implements GitHub {
     });
   }
 
-  // The App is installed once on the whole org; its installation token covers every repo.
-  private octokit(): Promise<InstallationOctokit> {
+  // The App is installed once on the whole owner (an org or a personal account);
+  // its installation token covers every repo.
+  private connect(): Promise<Installation> {
     this.installation ??= (async () => {
-      const { data } = await this.app.octokit.request("GET /orgs/{org}/installation", { org: this.opts.org });
-      return this.app.getInstallationOctokit(data.id);
+      const owner = this.opts.owner;
+      const { data } = await this.app.octokit
+        .request("GET /orgs/{org}/installation", { org: owner })
+        .catch((err) => {
+          if (status(err) !== 404) throw err;
+          return this.app.octokit.request("GET /users/{username}/installation", { username: owner });
+        })
+        .catch((err) => {
+          if (status(err) !== 404) throw err;
+          throw new AppNotInstalled(`The deployer's GitHub App isn't installed on ${owner}; install it on all of its repositories`);
+        });
+      const ownerType: OwnerType = data.target_type === "User" ? "User" : "Organization";
+      return { octokit: await this.app.getInstallationOctokit(data.id), ownerType };
     })().catch((err) => {
       this.installation = undefined;
       throw err;
     });
     return this.installation;
+  }
+
+  private async octokit(): Promise<InstallationOctokit> {
+    return (await this.connect()).octokit;
+  }
+
+  async ownerType(): Promise<OwnerType> {
+    return (await this.connect()).ownerType;
+  }
+
+  // Each self-hosted install names its own App, so ask GitHub rather than configuring it.
+  private appSlug(): Promise<string> {
+    this.slug ??= this.app.octokit
+      .request("GET /app")
+      .then(({ data }) => {
+        if (!data?.slug) throw new Error("GitHub didn't return the App's slug");
+        return data.slug;
+      })
+      .catch((err) => {
+        this.slug = undefined;
+        throw err;
+      });
+    return this.slug;
   }
 
   async loginForToken(token: string): Promise<string | null> {
@@ -135,7 +183,7 @@ export class OctokitGitHub implements GitHub {
     const octokit = await this.octokit();
     try {
       const res = await octokit.request("GET /orgs/{org}/members/{username}", {
-        org: this.opts.org,
+        org: this.opts.owner,
         username: login,
       });
       return (res.status as number) === 204;
@@ -302,19 +350,31 @@ export class OctokitGitHub implements GitHub {
   }
 
   // Design 5.7: PRs required, the check must pass, no required reviews, only the
-  // deployer's App can push to main, no force pushes or deletion.
+  // deployer's App can push to main, no force pushes or deletion. GitHub allows
+  // push restrictions only on org repos, so on a personal account anyone with
+  // write access can still merge a PR whose check has passed.
   async protectMain(repo: string): Promise<void> {
-    const octokit = await this.octokit();
-    await octokit.request("PUT /repos/{owner}/{repo}/branches/{branch}/protection", {
-      ...split(repo),
-      branch: "main",
-      required_status_checks: { strict: true, contexts: [CHECK_CONTEXT] },
-      enforce_admins: true,
-      required_pull_request_reviews: { required_approving_review_count: 0 },
-      restrictions: { users: [], teams: [], apps: [this.opts.appSlug] },
-      allow_force_pushes: false,
-      allow_deletions: false,
-    });
+    const { octokit, ownerType } = await this.connect();
+    const restrictions = ownerType === "Organization" ? { users: [], teams: [], apps: [await this.appSlug()] } : null;
+    try {
+      await octokit.request("PUT /repos/{owner}/{repo}/branches/{branch}/protection", {
+        ...split(repo),
+        branch: "main",
+        required_status_checks: { strict: true, contexts: [CHECK_CONTEXT] },
+        enforce_admins: true,
+        required_pull_request_reviews: { required_approving_review_count: 0 },
+        restrictions,
+        allow_force_pushes: false,
+        allow_deletions: false,
+      });
+    } catch (err) {
+      // "Upgrade to GitHub Pro or make this repository public to enable this feature."
+      const message = err instanceof Error ? err.message : String(err);
+      if (status(err) === 403 && /upgrade to github|make this repository public/i.test(message)) {
+        throw new ProtectionUnavailable(message);
+      }
+      throw err;
+    }
   }
 
   async archiveRepo(repo: string): Promise<void> {

@@ -24,7 +24,14 @@ describe("argument handling", () => {
   test("a missing deployer URL is explained", async () => {
     const r = await runCli(["whoami"], { env: { SLIPWAY_DEPLOYER_URL: "" } });
     assert.equal(r.code, 1);
-    assert.match(r.stderr, /deployerUrl/);
+    assert.match(r.stderr, /\/setup/);
+  });
+
+  test("setup refuses a URL that isn't https (except localhost)", async () => {
+    assert.equal((await runCli(["setup", "--deployer-url", "not a url"])).code, 2);
+    const r = await runCli(["setup", "--deployer-url", "http://deployer.example.com"]);
+    assert.equal(r.code, 2);
+    assert.match(r.stderr, /https:\/\//);
   });
 
   test("outside an app repo, app commands ask for --app", async () => {
@@ -70,7 +77,7 @@ describe("against a mock deployer", () => {
   before(async () => {
     state = {};
     deployer = await mockDeployer([
-      ["GET", /^\/api\/whoami$/, () => ({ json: { login: "alice" } })],
+      ["GET", /^\/api\/whoami$/, () => ({ json: { login: "alice", owner: "acme", ownerType: "Organization", codeowners: "@acme/platform" } })],
       ["POST", /^\/api\/apps$/, ({ body }) => ({ status: 201, json: app({ name: body.name, status: "registering", phase: "registering" }) })],
       ["GET", /^\/api\/apps\/([^/]+)$/, ({ match }) => {
         const next = state.apps?.[match[1]];
@@ -104,6 +111,23 @@ describe("against a mock deployer", () => {
     return () => responses[Math.min(i++, responses.length - 1)];
   };
 
+  test("setup saves the URL in the user's config and checks it with the deployer", async () => {
+    const home = tempDir();
+    try {
+      const own = { XDG_CONFIG_HOME: home.dir, SLIPWAY_DEPLOYER_URL: "" };
+      const r = await runCli(["setup", "--deployer-url", `${deployer.url}/`], { env: own });
+      assert.equal(r.code, 0, r.stderr);
+      assert.match(r.stdout, /New apps are created under acme/);
+      const saved = JSON.parse(readFileSync(path.join(home.dir, "slipway", "config.json"), "utf8"));
+      assert.equal(saved.deployerUrl, deployer.url);
+      const again = await runCli(["whoami"], { env: own });
+      assert.equal(again.code, 0, again.stderr);
+      assert.match(again.stdout, /^alice on http:\/\/127\.0\.0\.1:\d+ \(apps are created under acme\)$/m);
+    } finally {
+      home.cleanup();
+    }
+  });
+
   test("whoami sends the GitHub token", async () => {
     const r = await runCli(["whoami"], { env: env() });
     assert.equal(r.code, 0, r.stderr);
@@ -133,6 +157,7 @@ describe("against a mock deployer", () => {
     assert.match(yaml, /^name: gear-loans$/m);
     assert.match(yaml, /^description: "Tracks \\"equipment\\" loans: ops team"$/m);
     assert.match(yaml, /^owner: alice /m);
+    assert.match(readFileSync(path.join(dir, "CODEOWNERS"), "utf8"), /^\/app\.yaml +@acme\/platform$/m);
     assert.equal(parseAppYaml(yaml).name, "gear-loans");
     assert.ok(!existsSync(path.join(dir, "node_modules")));
     assert.ok(!existsSync(path.join(dir, ".env")), "apps aren't run locally, so new-app writes no .env");

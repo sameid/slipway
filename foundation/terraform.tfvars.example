@@ -1,8 +1,23 @@
-# Copy to terraform.tfvars (git-ignored). Only alert_email is required.
+# Copy to terraform.tfvars (git-ignored). region, github_owner and alert_email
+# are required.
+
+# Dedicated to slipway: the deployer's role may do anything in this region.
+region = "us-east-1"
+
+# The GitHub org or personal account that owns every app repo.
+github_owner = "your-org-or-login"
 
 alert_email = "you@example.com"
 
-# Monthly AWS Budgets limit in USD for spend billed to the region (ca-west-1).
+# Personal accounts only: who else may use the plugin (org membership decides
+# in an org). Give them write access to the app repos too.
+# github_allowed_users = ["a-teammate"]
+
+# CODEOWNERS entry for platform-owned files in new apps. Default: the owner on
+# a personal account, the app's creator in an org.
+# github_codeowners = "@your-org/platform"
+
+# Monthly AWS Budgets limit in USD for spend billed to the region.
 # budget_amount = 500
 
 # The deployer host builds linux/amd64 images, so it must be x86_64.

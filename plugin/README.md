@@ -2,18 +2,21 @@
 
 The slipway Claude Code plugin, for building internal apps. `/new-app` gives you a GitHub repo and a live staging link with working sign-in a few minutes later. After that, you describe features to Claude Code. `/ship` opens a pull request, which merges and deploys to staging once its checks pass. A person promotes staging to prod from the deployer dashboard.
 
-You don't need AWS credentials or any AWS knowledge. The plugin only uses the GitHub CLI and the deployer's API.
+You don't need AWS credentials or any AWS knowledge. The plugin only uses the GitHub CLI and the deployer's API. Someone on your team runs the platform (the deployer and its AWS infrastructure) in your own AWS account; see the [repo README](../README.md) to set one up.
 
 The plugin lives in `plugin/`, and the repo root is its marketplace. The platform side (infrastructure, the deployer, build and deploy scripts) is in the same repo, one level up.
 
 ## Install
 
-You need Claude Code, Node.js 24 and the GitHub CLI signed in to an account in the `acme` org (`gh auth login`). There's no Docker or local database: apps aren't run on your laptop, and you preview every change on staging. Then, in Claude Code:
+You need Claude Code, Node.js 24, and the GitHub CLI signed in (`gh auth login`) as an account the deployer accepts: a member of the GitHub org it serves, or on a personal account, its owner or someone on its allowed list. There's no Docker or local database: apps aren't run on your laptop, and you preview every change on staging. Then, in Claude Code:
 
 ```
 /plugin marketplace add sameid/slipway
 /plugin install slipway@slipway
+/setup https://dxxxx.cloudfront.net
 ```
+
+`/setup` takes your deployer's URL (ask whoever runs your slipway) and saves it in `~/.config/slipway/config.json`. It's a one-time step per laptop.
 
 To get updates, run `/plugin marketplace update slipway`.
 
@@ -23,7 +26,8 @@ If another plugin uses the same command name, the commands are also available as
 
 | Command | What it does |
 |---|---|
-| `/new-app` | Asks for a name, template and one-line description. Then creates `acme/<name>` from the template, registers the app with the deployer, and waits for the staging link (10–15 minutes the first time). |
+| `/setup` | Saves your deployer's URL and checks that it accepts your GitHub login. Shows the GitHub account new apps are created under. |
+| `/new-app` | Asks for a name, template and one-line description. Then creates `<owner>/<name>` from the template (the owner is the org or account your deployer serves), registers the app with the deployer, and waits for the staging link (10–15 minutes the first time). |
 | `/ship` | Run it from a task's worktree. Commits the work, rebases onto `main` (regenerating a Drizzle migration if it conflicts), pushes the branch, and opens or updates the PR. Then it waits for the check, the auto-merge and the staging deploy. If the check fails, it shows the failing step and log so Claude can fix it and push again. |
 | `/status` | Shows the staging and prod releases with their links, running and failed jobs, and any worktrees ready to clean up. |
 | `/secret list`, `/secret set KEY --env staging\|prod` | Lists declared secrets, or gives you a one-time browser link for setting a value. Values never pass through Claude Code. |
@@ -50,9 +54,18 @@ The command and skill instructions rely on these, so keep them stable:
 | 4 | The PR passed its check but won't auto-merge (see the note) |
 | 10 | Still in progress when `--max-seconds` ran out (default 540, under the Bash tool's 10-minute limit). Run the same command again. |
 
-## For the dev team
+## Configuration
 
-- **Deployer URL:** after the foundation is deployed, put the deployer's CloudFront URL in `slipway.config.json` (`deployerUrl`) and release a new plugin version. `SLIPWAY_DEPLOYER_URL` overrides it, which is useful for testing against a local deployer.
+The CLI finds the deployer's URL in this order:
+
+1. `SLIPWAY_DEPLOYER_URL`, useful for testing against a local deployer;
+2. `~/.config/slipway/config.json` (or `$XDG_CONFIG_HOME/slipway/config.json`), written by `/setup` or `slipway setup --deployer-url <url>`;
+3. `deployerUrl` in the plugin's own `slipway.config.json`. It's empty here. A team that would rather skip `/setup` can fork this repo, set it, and install the plugin from their fork.
+
+The GitHub owner and the CODEOWNERS entry for new apps come from the deployer (`slipway whoami`), so there's nothing else to configure.
+
+## Development
+
 - **Releasing:** bump `version` in `.claude-plugin/plugin.json`. Colleagues get the change when they update the marketplace. Because the version is set, a commit without a version bump doesn't reach them.
 - **Local deployer:** run the deployer in fake mode (`DEPLOYER_FAKE=1`, see `../deployer`) and point the CLI at it:
   ```sh

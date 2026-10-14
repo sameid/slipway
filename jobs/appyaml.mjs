@@ -4,8 +4,8 @@
 //
 //   node appyaml.mjs validate <app.yaml> [--app NAME]
 //   node appyaml.mjs get <app.yaml> <key>          e.g. web.build_command, secrets
-//   node appyaml.mjs render-shared --app NAME --out-dir DIR --modules-dir DIR --state-bucket B [--region R]
-//   node appyaml.mjs render-env --app NAME --env ENV --out-dir DIR --modules-dir DIR --state-bucket B [--region R]
+//   node appyaml.mjs render-shared --app NAME --out-dir DIR --modules-dir DIR --state-bucket B --region R
+//   node appyaml.mjs render-env --app NAME --env ENV --out-dir DIR --modules-dir DIR --state-bucket B --region R
 //                               (--app-yaml FILE | --inputs-json FILE)
 //   node appyaml.mjs check-links DIR [--what TEXT]   fail if a symbolic link under DIR points outside it
 //
@@ -192,8 +192,9 @@ function moduleSource(outDir, modulesDir, name) {
 }
 
 /** Root config for apps/<app>/shared.tfstate. */
-export function renderShared({ app, outDir, modulesDir, stateBucket, region = "ca-west-1", versions = readVersions() }) {
+export function renderShared({ app, outDir, modulesDir, stateBucket, region, versions = readVersions() }) {
   if (!APP_NAME.test(app)) throw new Error(`invalid app name "${app}"`);
+  if (!region) throw new Error("region is required");
   const outputs = ["ecr_repository_url", "ecr_repository_name", "log_group_name"];
   return {
     terraform: terraformBlock({ app, stack: "shared", stateBucket, region, versions }),
@@ -221,7 +222,8 @@ export function inputsFromConfig(config, env) {
 }
 
 /** Root config for apps/<app>/<env>.tfstate. Per-phase values stay variables (-var on the command line). */
-export function renderEnv({ app, env, inputs, outDir, modulesDir, stateBucket, region = "ca-west-1", versions = readVersions() }) {
+export function renderEnv({ app, env, inputs, outDir, modulesDir, stateBucket, region, versions = readVersions() }) {
+  if (!region) throw new Error("region is required");
   if (!APP_NAME.test(app)) throw new Error(`invalid app name "${app}"`);
   if (!["staging", "prod"].includes(env)) throw new Error(`invalid env "${env}"`);
   for (const key of ["size", "api_port", "health_check_path", "migrate_command", "secret_names"]) {

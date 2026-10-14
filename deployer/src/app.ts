@@ -72,7 +72,7 @@ export function createApp(deps: Deps, extraRoutes?: (app: express.Express) => vo
   app.set("trust proxy", true); // only CloudFront can reach the instance
   app.set("views", viewsDir);
   app.set("view engine", "ejs");
-  app.locals.org = deps.config.org;
+  app.locals.owner = deps.config.owner;
   app.locals.fake = deps.config.fake;
   app.locals.fmt = (t: string | null) => (t ? `${t.replace("T", " ").slice(0, 16)} UTC` : "");
   app.locals.ago = (t: string | null) => ago(t, deps.now().getTime());

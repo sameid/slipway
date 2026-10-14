@@ -28,7 +28,7 @@ git check-ref-format --branch "$branch" >/dev/null 2>&1 || die "'$branch' isn't 
 
 common=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || die "run this inside the app's git repo"
 main=$(dirname "$common")
-[[ -f $main/app.yaml ]] || die "$main has no app.yaml; is this an slipway app?"
+[[ -f $main/app.yaml ]] || die "$main has no app.yaml; is this a slipway app?"
 app=$(sed -nE 's/^name:[[:space:]]*["'\'']?([a-z0-9-]+).*/\1/p' "$main/app.yaml" | head -n 1)
 [[ -n $app ]] || die "couldn't read the app name from $main/app.yaml"
 dir="$(dirname "$main")/$app-worktrees/$branch"

@@ -4,6 +4,7 @@ import { parseAppYaml, type AppYaml } from "./appyaml.js";
 import { iso, type Deps } from "./deps.js";
 import { apps, type AppRow } from "./db/schema.js";
 import { ApiError } from "./errors.js";
+import { ProtectionUnavailable } from "./github.js";
 import { enqueue, getApp, queueBuildAndDeploy } from "./jobs.js";
 import { invalidAppName, repoFor } from "./names.js";
 
@@ -48,9 +49,14 @@ async function readRepo(deps: Deps, repo: string, name: string): Promise<{ head:
 
 /**
  * Register a new app, or retry the first deploy of one whose registration failed
- * (its owner runs /new-app's register step again).
+ * (its owner runs /new-app's register step again). The warning says what
+ * couldn't be set up but didn't stop the registration.
  */
-export async function registerApp(deps: Deps, name: string, owner: string): Promise<AppRow> {
+export async function registerApp(
+  deps: Deps,
+  name: string,
+  owner: string,
+): Promise<{ app: AppRow; warning: string | null }> {
   const invalid = invalidAppName(name);
   if (invalid) throw new ApiError(400, invalid);
   const existing = getApp(deps, name);
@@ -59,14 +65,23 @@ export async function registerApp(deps: Deps, name: string, owner: string): Prom
     throw new ApiError(403, `${name} belongs to ${existing.owner}; only they can retry its registration`);
   }
 
-  const repo = repoFor(deps.config.org, name);
+  const repo = repoFor(deps.config.owner, name);
   const { head, manifest } = await readRepo(deps, repo, name);
 
   // Before recording anything, so a failure leaves nothing half-registered.
+  // GitHub Free can't protect private repos; the app still works, but nothing
+  // stops a direct push to main from deploying to staging unchecked.
+  let warning: string | null = null;
   try {
     await deps.github.protectMain(repo);
   } catch (err) {
-    throw new ApiError(502, `Couldn't set branch protection on ${repo}: ${String(err)}`);
+    if (!(err instanceof ProtectionUnavailable)) {
+      throw new ApiError(502, `Couldn't set branch protection on ${repo}: ${String(err)}`);
+    }
+    warning =
+      `GitHub's plan for ${deps.config.owner} doesn't allow branch protection on private repos, so main isn't protected: ` +
+      "a direct push to main deploys to staging without the check. Upgrade the plan, or only change main through PRs.";
+    deps.log("branch protection unavailable", { app: name, repo });
   }
 
   const fields = { status: "registering", autoMerge: manifest.autoMerge, error: null, failedJobId: null };
@@ -82,5 +97,5 @@ export async function registerApp(deps: Deps, name: string, owner: string): Prom
   // shared stack → build main → staging, each after the previous succeeds.
   const shared = enqueue(deps, { app: name, env: "shared", kind: "deploy", requestedBy: owner });
   queueBuildAndDeploy(deps, name, head, owner, shared.id);
-  return app;
+  return { app, warning };
 }

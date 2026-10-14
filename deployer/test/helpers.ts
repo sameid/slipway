@@ -10,6 +10,7 @@ import { jobs, users, type JobRow } from "../src/db/schema.js";
 import type { Deps } from "../src/deps.js";
 import { handleGithubEvent } from "../src/events.js";
 import { FAKE_WEBHOOK_SECRET, FakeGitHub, FakePlatform, FakeRuns } from "../src/fake.js";
+import type { OwnerType } from "../src/github.js";
 import { registerApp } from "../src/registration.js";
 import { Worker } from "../src/worker.js";
 
@@ -18,11 +19,11 @@ export const testConfig = (over: Partial<Config> = {}): Config => ({
   fake: true,
   host: "127.0.0.1",
   port: 0,
-  region: "ca-west-1",
+  region: "us-east-1",
   dataDir: ":memory:",
   dbFile: ":memory:",
-  org: "acme",
-  appSlug: "slipway-deployer",
+  owner: "acme",
+  allowedUsers: [],
   runnerSocket: "/nonexistent/runner.sock",
   githubAppSecretId: "slipway/github-app",
   clerkLocalSecretId: "slipway/clerk/local",
@@ -30,6 +31,7 @@ export const testConfig = (over: Partial<Config> = {}): Config => ({
   registerRetryMs: 0,
   workerIntervalMs: 60_000,
   fakeBuildSeconds: 0,
+  fakeOwnerType: "Organization",
   ...over,
 });
 
@@ -43,7 +45,7 @@ export type TestEnv = {
   logs: string[];
 };
 
-export function setup(config: Partial<Config> = {}): TestEnv {
+export function setup(config: Partial<Config> = {}, ownerType: OwnerType = "Organization"): TestEnv {
   const db = openDb(":memory:");
   runMigrations(db);
   const clock = {
@@ -52,7 +54,7 @@ export function setup(config: Partial<Config> = {}): TestEnv {
       this.now += ms;
     },
   };
-  const github = new FakeGitHub("acme");
+  const github = new FakeGitHub(testConfig(config).owner, ownerType);
   const runs = new FakeRuns({ github, now: () => clock.now });
   const platform = new FakePlatform();
   const logs: string[] = [];

@@ -1,4 +1,4 @@
-# Shared foundation for slipway (design 5.4, slimmed down). ca-west-1 is
+# Shared foundation for slipway (design 5.4, slimmed down). var.region is
 # dedicated to slipway, so this uses what the region already has (the
 # default VPC and its subnets) and adds only:
 #

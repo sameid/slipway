@@ -78,7 +78,7 @@ export function currentApp(cwd = process.cwd()) {
   const manifest = root && readAppYaml(root);
   if (!manifest || !manifest.template) {
     throw new CliError(
-      "This isn't an slipway app repo (no app.yaml with a template at the git root). " +
+      "This isn't a slipway app repo (no app.yaml with a template at the git root). " +
         "cd into the app, or pass --app <name>.",
       EXIT.USAGE,
     );

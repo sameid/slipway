@@ -5,7 +5,7 @@ import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import express from "express";
 import { parse } from "yaml";
 import type { DevConfig, Platform } from "./aws.js";
-import type { CommitStatus, GitHub, MergeResult, PullInfo } from "./github.js";
+import { ProtectionUnavailable, type CommitStatus, type GitHub, type MergeResult, type OwnerType, type PullInfo } from "./github.js";
 import type { RunInfo, Runs, StartRunInput } from "./runs.js";
 
 const sha1 = (s: string) => createHash("sha1").update(s).digest("hex");
@@ -58,7 +58,13 @@ export class FakeGitHub implements GitHub {
   /** Where simulated webhooks go (set by the app in fake mode; tests call the handler directly). */
   onEvent?: EventSink;
 
-  constructor(readonly org = "acme") {}
+  /** Set to simulate GitHub Free, which can't protect private repos. */
+  protectionUnavailable = false;
+
+  constructor(
+    readonly owner = "acme",
+    readonly type: OwnerType = "Organization",
+  ) {}
 
   /** Repos appear on first use with an app.yaml, as if /new-app had created them. Names starting "missing" don't exist. */
   repo(fullName: string): FakeRepo | undefined {
@@ -101,7 +107,7 @@ export class FakeGitHub implements GitHub {
     return {
       action,
       number: pull.number,
-      repository: { full_name: `${this.org}/${repo.name}` },
+      repository: { full_name: `${this.owner}/${repo.name}` },
       sender: { login: "fake-dev" },
       pull_request: {
         number: pull.number,
@@ -127,7 +133,7 @@ export class FakeGitHub implements GitHub {
     this.emit("push", {
       ref: "refs/heads/main",
       after: c.sha,
-      repository: { full_name: `${this.org}/${repo.name}` },
+      repository: { full_name: `${this.owner}/${repo.name}` },
       sender: { login: "fake-dev" },
     });
     return c.sha;
@@ -151,7 +157,7 @@ export class FakeGitHub implements GitHub {
       merged: false,
       headSha: c.sha,
       headRef: opts.branch ?? `feat/change-${number}`,
-      headRepo: `${this.org}/${repo.name}`,
+      headRepo: `${this.owner}/${repo.name}`,
       baseRef: "main",
       baseSha: repo.main,
       mergeCommitSha: null,
@@ -192,6 +198,10 @@ export class FakeGitHub implements GitHub {
 
   async loginForToken(token: string): Promise<string | null> {
     return token.startsWith("fake:") && token.length > 5 ? token.slice(5) : null;
+  }
+
+  async ownerType(): Promise<OwnerType> {
+    return this.type;
   }
 
   async isOrgMember(login: string): Promise<boolean> {
@@ -277,7 +287,7 @@ export class FakeGitHub implements GitHub {
     this.emit("push", {
       ref: "refs/heads/main",
       after: c.sha,
-      repository: { full_name: `${this.org}/${r.name}` },
+      repository: { full_name: `${this.owner}/${r.name}` },
       sender: { login: "slipway-deployer[bot]" },
     });
     return { merged: true, sha: c.sha };
@@ -286,6 +296,9 @@ export class FakeGitHub implements GitHub {
   async deleteBranch(): Promise<void> {}
 
   async protectMain(repo: string): Promise<void> {
+    if (this.protectionUnavailable) {
+      throw new ProtectionUnavailable("Upgrade to GitHub Pro or make this repository public to enable this feature.");
+    }
     this.must(repo).protected = true;
   }
 
@@ -346,13 +359,13 @@ export class FakeRuns implements Runs {
       const digest = `sha256:${createHash("sha256").update(`${e.APP}:${e.COMMIT_SHA}`).digest("hex")}`;
       return {
         IMAGE_DIGEST: digest,
-        IMAGE_URI: `123456789012.dkr.ecr.ca-west-1.amazonaws.com/app-${e.APP}@${digest}`,
+        IMAGE_URI: `123456789012.dkr.ecr.us-east-1.amazonaws.com/app-${e.APP}@${digest}`,
         WEB_ARTIFACT: `s3://slipway-artifacts-fake/releases/${e.APP}/${e.COMMIT_SHA}/web.tgz`,
       };
     }
     if (e.ACTION === "apply" && (e.ENV === "staging" || e.ENV === "prod")) {
       const site = this.opts.siteUrl?.(e.APP ?? "", e.ENV) ?? `https://d${sha1(`${e.APP}${e.ENV}`).slice(0, 13)}.cloudfront.net`;
-      return { APP_URL: site, SERVICE_URL: `https://app-${e.APP}-${e.ENV}-api-f00d.ecs.ca-west-1.on.aws` };
+      return { APP_URL: site, SERVICE_URL: `https://app-${e.APP}-${e.ENV}-api-f00d.ecs.us-east-1.on.aws` };
     }
     return {};
   }
@@ -441,7 +454,7 @@ export class FakePlatform implements Platform {
 export function fakeRoutes(github: FakeGitHub): express.Router {
   const router = express.Router();
   router.use(express.json());
-  const repo = (req: express.Request) => `${github.org}/${String(req.params.app)}`;
+  const repo = (req: express.Request) => `${github.owner}/${String(req.params.app)}`;
   const files = (body: unknown): Record<string, string> =>
     body && typeof body === "object" && "files" in body && typeof body.files === "object" && body.files
       ? (body.files as Record<string, string>)

@@ -3,7 +3,7 @@
 // platform-owned fields of app.yaml (name, auth, auto_merge, sizes). Branch protection and
 // the deployer enforce the same rules on GitHub; this just stops the agent early.
 //
-// It only acts inside an slipway app repo (git root has an app.yaml with a template key)
+// It only acts inside a slipway app repo (git root has an app.yaml with a template key)
 // and fails open: bad input or an internal error never blocks a tool call.
 import { existsSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
@@ -147,7 +147,7 @@ function checkBash(command, cwd) {
   );
 }
 
-// The git root above dir if it's an slipway app repo, else null. Walks up from the
+// The git root above dir if it's a slipway app repo, else null. Walks up from the
 // nearest existing directory so new files in new folders are covered too.
 export function appRepoRoot(dir) {
   let current = path.resolve(dir);

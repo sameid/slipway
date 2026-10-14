@@ -2,6 +2,7 @@
 // /etc/slipway/deployer.env (written by the foundation's user data); locally,
 // from deployer/.env. See docs/contracts.md, "Deployer host".
 import { join } from "node:path";
+import type { OwnerType } from "./github.js";
 
 export type Config = {
   production: boolean;
@@ -11,8 +12,12 @@ export type Config = {
   region: string;
   dataDir: string;
   dbFile: string;
-  org: string;
-  appSlug: string;
+  /** The GitHub org or personal account that owns every app repo. */
+  owner: string;
+  /** Extra logins allowed to use the plugin API when the owner is a personal account (lowercase). */
+  allowedUsers: string[];
+  /** CODEOWNERS entry for platform-owned files in new apps; unset uses a default (see /api/whoami). */
+  codeowners?: string;
   /** The runner's Unix socket (docs/contracts.md, "Runner"). */
   runnerSocket: string;
   githubAppSecretId: string;
@@ -30,6 +35,8 @@ export type Config = {
   registerRetryMs: number;
   workerIntervalMs: number;
   fakeBuildSeconds: number;
+  /** Fake mode only: simulate an org or a personal account (FAKE_OWNER_TYPE=User). */
+  fakeOwnerType: OwnerType;
 };
 
 function env(name: string, fallback?: string): string {
@@ -61,11 +68,15 @@ export function loadConfig(): Config {
     // On the instance Caddy listens for CloudFront and proxies to 127.0.0.1:3000.
     host: env("HOST", "127.0.0.1"),
     port: Number(env("PORT", "8080")),
-    region: env("AWS_REGION", "ca-west-1"),
+    region: env("AWS_REGION", fake ? "us-east-1" : undefined),
     dataDir,
     dbFile: join(dataDir, "deployer.db"),
-    org: env("GITHUB_ORG", "acme"),
-    appSlug: env("GITHUB_APP_SLUG", "slipway-deployer"),
+    owner: env("GITHUB_OWNER", fake ? "acme" : undefined),
+    allowedUsers: (process.env.GITHUB_ALLOWED_USERS ?? "")
+      .split(/[\s,]+/)
+      .map((login) => login.trim().replace(/^@/, "").toLowerCase())
+      .filter(Boolean),
+    codeowners: process.env.GITHUB_CODEOWNERS || undefined,
     runnerSocket: env("RUNNER_SOCKET", fake || !production ? "./data/runner/runner.sock" : undefined),
     githubAppSecretId: env("GITHUB_APP_SECRET_ID", "slipway/github-app"),
     githubApp,
@@ -77,5 +88,6 @@ export function loadConfig(): Config {
     registerRetryMs: Number(env("REGISTER_RETRY_MS", "2000")),
     workerIntervalMs: Number(env("WORKER_INTERVAL_SECONDS", fake ? "2" : "15")) * 1000,
     fakeBuildSeconds: Number(env("FAKE_BUILD_SECONDS", "5")),
+    fakeOwnerType: process.env.FAKE_OWNER_TYPE === "User" ? "User" : "Organization",
   };
 }

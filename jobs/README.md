@@ -1,6 +1,6 @@
 # jobs/
 
-The two jobs behind every build and deploy (design 5.6). CodeBuild isn't available in `ca-west-1`, so the **runner** runs them on the deployer instance (`deployer/src/runner`). They ship in the same release as the deployer, with `modules/` next to them. Interfaces, variables and log conventions are in `docs/contracts.md` ("Runner", "build-release", "deploy-env").
+The two jobs behind every build and deploy (design 5.6). The **runner** runs them on the deployer instance (`deployer/src/runner`) rather than in CodeBuild, which keeps the platform to one instance and works in every region. They expect `AWS_REGION` in the environment (the runner sets it from the foundation's region). They ship in the same release as the deployer, with `modules/` next to them. Interfaces, variables and log conventions are in `docs/contracts.md` ("Runner", "build-release", "deploy-env").
 
 | File | What it does |
 |---|---|
