@@ -1,0 +1,15 @@
+{
+  "name": "slipway-jobs",
+  "private": true,
+  "description": "build-release and deploy-env, run by the runner on the deployer instance",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "test": "node --test \"test/*.test.mjs\""
+  },
+  "dependencies": {
+    "yaml": "^2.8.1"
+  }
+}

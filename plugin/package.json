@@ -1,0 +1,12 @@
+{
+  "name": "slipway-plugin",
+  "private": true,
+  "description": "Tests for the slipway Claude Code plugin. The plugin itself has no dependencies.",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "test": "node --test \"test/**/*.test.mjs\"",
+    "validate": "claude plugin validate .. --strict && claude plugin validate .claude-plugin/plugin.json --strict"
+  }
+}

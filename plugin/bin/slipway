@@ -1,0 +1,13 @@
+#!/usr/bin/env node
+// slipway CLI. Claude Code puts this plugin's bin/ on PATH for the Bash tool.
+// This launcher stays CommonJS-compatible so it works without a file extension;
+// the CLI itself lives in ../cli/.
+const path = require("node:path");
+const { pathToFileURL } = require("node:url");
+
+import(pathToFileURL(path.join(__dirname, "..", "cli", "main.mjs")).href)
+  .then((cli) => cli.main(process.argv.slice(2)))
+  .catch((err) => {
+    process.stderr.write(`slipway: ${err && err.stack ? err.stack : err}\n`);
+    process.exit(1);
+  });

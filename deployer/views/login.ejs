@@ -1,0 +1,24 @@
+<%- include("partials/head") %>
+<div class="mx-auto mt-12 max-w-sm">
+  <div class="card card--default gap-5 p-6">
+    <div class="card__header">
+      <h1 class="text-xl font-semibold tracking-tight">Sign in</h1>
+      <p class="card__description">Deployer accounts are created by an admin.</p>
+    </div>
+    <% if (error) { %><div class="alert alert--danger" role="alert"><div class="alert__content"><p class="alert__description text-danger"><%= error %></p></div></div><% } %>
+    <form method="post" action="/login" class="flex flex-col gap-4">
+      <input type="hidden" name="_csrf" value="<%= csrfToken %>">
+      <input type="hidden" name="next" value="<%= next %>">
+      <div class="textfield textfield--full-width">
+        <label class="label" for="email">Email</label>
+        <input class="input" type="email" id="email" name="email" value="<%= email %>" autocomplete="username" required autofocus>
+      </div>
+      <div class="textfield textfield--full-width">
+        <label class="label" for="password">Password</label>
+        <input class="input" type="password" id="password" name="password" autocomplete="current-password" required>
+      </div>
+      <button class="button button--primary button--full-width">Sign in</button>
+    </form>
+  </div>
+</div>
+<%- include("partials/foot") %>

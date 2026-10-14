@@ -1,0 +1,5 @@
+# Platform-owned files. Changes need dev team approval, and the deployer won't
+# auto-merge a PR that touches them.
+/app.yaml     @acme/dev-team
+/CODEOWNERS   @acme/dev-team
+/.github/     @acme/dev-team

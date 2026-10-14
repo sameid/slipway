@@ -1,0 +1,32 @@
+#!/usr/sbin/nft -f
+# Keeps untrusted build steps away from credentials and the deployer
+# (docs/contracts.md, "Runner"). Loaded at boot by slipway-nftables.service,
+# not nftables.service: that one flushes the whole ruleset on stop and
+# reload, which would also wipe Docker's rules.
+#
+# slipway-build runs code from app repos (npm install scripts, tests). It
+# must not reach the instance metadata service, where the instance role's
+# credentials (and through them the deploy role) come from, nor the
+# deployer (3000), Caddy (8080) or Caddy's admin API (2019).
+#
+# Docker build containers can't get IMDSv2 tokens (hop limit 1), and the
+# input chain stops them from reaching Caddy through the bridge gateway.
+
+# Replace only this table, so loading the file again is safe.
+table inet slipway
+delete table inet slipway
+
+table inet slipway {
+	chain output {
+		type filter hook output priority filter; policy accept;
+		meta skuid "slipway-build" ip daddr 169.254.169.254 counter reject
+		meta skuid "slipway-build" ip6 daddr fd00:ec2::254 counter reject
+		meta skuid "slipway-build" tcp dport { 2019, 3000, 8080 } counter reject with tcp reset
+	}
+
+	chain input {
+		type filter hook input priority filter; policy accept;
+		iifname "docker*" tcp dport { 2019, 3000, 8080 } counter reject with tcp reset
+		iifname "br-*" tcp dport { 2019, 3000, 8080 } counter reject with tcp reset
+	}
+}

@@ -1,0 +1,28 @@
+name: __APP_NAME__
+template: react-express
+description: "__APP_DESCRIPTION__"
+owner: __APP_OWNER__              # GitHub username
+
+api:
+  port: 3000
+  health_check: /api/health
+  migrate_command: ["node", "dist/migrate.js"]
+
+web:
+  build_command: npm run build --workspace web
+  output_dir: web/dist
+
+# Names of third-party keys the API reads from process.env. Never put values
+# here: set them per environment with `/secret set <KEY> --env staging|prod`.
+# For example:
+#   secrets:
+#     - STRIPE_KEY
+#     - OPENAI_API_KEY
+secrets: []
+
+# Platform-owned (dev team approval required to change)
+auth: clerk
+auto_merge: true
+sizes:
+  staging: small
+  prod: small

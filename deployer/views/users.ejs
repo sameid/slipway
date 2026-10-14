@@ -1,0 +1,62 @@
+<%- include("partials/head") %>
+<h1 class="text-2xl font-semibold tracking-tight">Users</h1>
+<p class="mt-1 text-sm text-muted">Every user can promote, roll back and confirm teardowns. Admins also manage accounts.</p>
+<% if (error) { %><div class="alert alert--danger mt-6" role="alert"><div class="alert__content"><p class="alert__description text-danger"><%= error %></p></div></div><% } %>
+<% if (created) { %>
+<div class="alert alert--success mt-6" role="status">
+  <div class="alert__content">
+    <p class="alert__title">Temporary password for <%= created.email %></p>
+    <p class="alert__description">It's shown once; send it to them privately. They'll choose their own at first sign-in.</p>
+    <p class="mt-2 select-all rounded-lg bg-default px-3 py-1.5 font-mono text-base secret-once"><code><%= created.password %></code></p>
+  </div>
+</div>
+<% } %>
+
+<div class="mt-6 table-root table-root--primary">
+  <div class="table__scroll-container">
+    <table class="table__content">
+      <thead class="table__header"><tr>
+        <th class="table__column">Email</th><th class="table__column">Name</th><th class="table__column">Role</th><th class="table__column">Status</th><th class="table__column">Last sign-in</th><th class="table__column"></th>
+      </tr></thead>
+      <tbody class="table__body">
+      <% for (const u of users) { %>
+        <tr class="table__row">
+          <td class="table__cell"><%= u.email %></td>
+          <td class="table__cell"><%= u.name %></td>
+          <td class="table__cell"><span class="chip chip--soft chip--sm <%= u.isAdmin ? "chip--accent" : "chip--default" %>"><span class="chip__label"><%= u.isAdmin ? "admin" : "user" %></span></span></td>
+          <td class="table__cell"><span class="chip chip--soft chip--sm <%= u.disabled ? "chip--danger" : u.mustChangePassword ? "chip--warning" : "chip--success" %>"><span class="chip__label"><%= u.disabled ? "disabled" : u.mustChangePassword ? "temporary password" : "active" %></span></span></td>
+          <td class="table__cell text-muted"><%= u.lastLoginAt ? fmt(u.lastLoginAt) : "never" %></td>
+          <td class="table__cell">
+            <div class="flex justify-end gap-1">
+              <form method="post" action="/users/<%= u.id %>/reset">
+                <input type="hidden" name="_csrf" value="<%= csrfToken %>"><button class="button button--ghost button--sm">Reset password</button>
+              </form>
+              <% if (u.id !== user.id) { %>
+              <form method="post" action="/users/<%= u.id %>/<%= u.disabled ? "enable" : "disable" %>">
+                <input type="hidden" name="_csrf" value="<%= csrfToken %>"><button class="button button--sm <%= u.disabled ? "button--ghost" : "button--danger-soft" %>"><%= u.disabled ? "Enable" : "Disable" %></button>
+              </form>
+              <% } %>
+            </div>
+          </td>
+        </tr>
+      <% } %>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<%- include("partials/section", { heading: "Add a user" }) %>
+<form method="post" action="/users" class="card card--default flex-row flex-wrap items-end gap-4">
+  <input type="hidden" name="_csrf" value="<%= csrfToken %>">
+  <div class="textfield min-w-48 flex-1">
+    <label class="label" for="name">Name</label>
+    <input class="input" type="text" id="name" name="name" required>
+  </div>
+  <div class="textfield min-w-64 flex-1">
+    <label class="label" for="email">Email</label>
+    <input class="input" type="email" id="email" name="email" required>
+  </div>
+  <label class="flex items-center gap-2 pb-2 text-sm"><input class="size-4 accent-accent" type="checkbox" name="is_admin"> Admin</label>
+  <button class="button button--primary">Create account</button>
+</form>
+<%- include("partials/foot") %>

@@ -1,0 +1,3 @@
+<%# How long `job` has been running (counting up in the browser, see static/elapsed.js) or took. Empty before it starts. -%>
+<% const seconds = jobSeconds(job); -%>
+<% if (seconds !== null && job.status === "running") { %><span class="tabular-nums" data-elapsed="<%= Math.floor(seconds) %>"><%= duration(seconds) %></span><% } else if (seconds !== null && job.finishedAt) { %><span class="tabular-nums"><%= duration(seconds) %></span><% } -%>

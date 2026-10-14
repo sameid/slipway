@@ -1,0 +1,9 @@
+# The API image is built from the repo root: docker build -f api/Dockerfile .
+**/node_modules
+**/dist
+web/*
+!web/package.json
+scripts
+.env
+.env.local
+.git

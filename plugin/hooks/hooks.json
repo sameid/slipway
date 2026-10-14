@@ -1,0 +1,17 @@
+{
+  "description": "slipway guardrails: in slipway app repos, block changes to .github/, CODEOWNERS and the platform-owned fields of app.yaml.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/guard.mjs\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

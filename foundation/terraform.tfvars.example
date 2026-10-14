@@ -1,0 +1,13 @@
+# Copy to terraform.tfvars (git-ignored). Only alert_email is required.
+
+alert_email = "you@example.com"
+
+# Monthly AWS Budgets limit in USD for spend billed to the region (ca-west-1).
+# budget_amount = 500
+
+# The deployer host builds linux/amd64 images, so it must be x86_64.
+# deployer_instance_type = "t3.small"
+# deployer_az_suffix     = "a"
+# deployer_volume_gb     = 40
+# runner_max_builds      = 1
+# runner_max_deploys     = 2

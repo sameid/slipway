@@ -1,0 +1,227 @@
+<%- include("partials/head") %>
+<nav class="breadcrumbs mb-3 text-sm text-muted"><a class="hover:underline" href="/">Apps</a> <span class="mx-1">/</span> <%= app.name %></nav>
+<div class="flex flex-wrap items-start justify-between gap-4">
+  <div>
+    <h1 class="flex items-center gap-3 text-2xl font-semibold tracking-tight"><%= app.name %> <%- include("partials/badge", { status: app.status }) %></h1>
+    <p class="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-sm text-muted">
+      <a class="link" href="https://github.com/<%= app.repo %>"><%= app.repo %></a>
+      <span>owner <span class="text-foreground"><%= app.owner %></span></span>
+      <span>auto-merge <span class="text-foreground"><%= app.autoMerge ? "on" : "off" %></span></span>
+      <span title="<%= fmt(app.createdAt) %>">registered <%= ago(app.createdAt) %></span>
+    </p>
+  </div>
+  <% if (["active", "failed", "destroy_requested"].includes(app.status)) { %>
+  <form method="post" action="/apps/<%= app.name %>/sync" title="Queue checks for open PRs and builds for main that missed webhooks would have queued">
+    <input type="hidden" name="_csrf" value="<%= csrfToken %>">
+    <button class="button button--secondary button--sm">Sync with GitHub</button>
+  </form>
+  <% } %>
+</div>
+<% if (app.error) { %>
+<div class="alert alert--danger mt-6" role="alert">
+  <div class="alert__content"><p class="alert__title">Something failed</p><p class="alert__description"><%= app.error %></p></div>
+</div>
+<% } %>
+
+<div class="mt-6 grid gap-4 md:grid-cols-2">
+  <div class="card card--default">
+    <div class="card__header"><p class="card__title text-base">Staging</p></div>
+    <div class="card__content gap-2 text-sm">
+      <% if (staging) { %>
+        <p>Release <%- include("partials/sha", { sha: staging.commitSha, shaRepo: app.repo }) %> <span class="text-muted">#<%= staging.id %></span></p>
+      <% } else { %><p class="text-muted">Not deployed yet.</p><% } %>
+      <% if (app.stagingUrl) { %><p><a class="link" href="<%= app.stagingUrl %>"><%= app.stagingUrl %></a></p><% } %>
+    </div>
+    <% if (canPromote) { %>
+    <div class="card__footer gap-3">
+      <form method="post" action="/apps/<%= app.name %>/promote">
+        <input type="hidden" name="_csrf" value="<%= csrfToken %>">
+        <button class="button button--primary button--sm" <%= prod && prod.id === staging.id ? "disabled" : "" %>>Promote <%= shortSha(staging.commitSha) %> to prod</button>
+      </form>
+      <% if (prod && prod.id === staging.id) { %><span class="text-xs text-muted">Prod already runs this release.</span><% } %>
+    </div>
+    <% } %>
+  </div>
+  <div class="card card--default">
+    <div class="card__header"><p class="card__title text-base">Prod</p></div>
+    <div class="card__content gap-2 text-sm">
+      <% if (prod) { %>
+        <p>Release <%- include("partials/sha", { sha: prod.commitSha, shaRepo: app.repo }) %> <span class="text-muted">#<%= prod.id %></span></p>
+      <% } else { %><p class="text-muted">Not deployed yet. The first promote creates prod, with an empty database.</p><% } %>
+      <% if (app.prodUrl) { %><p><a class="link" href="<%= app.prodUrl %>"><%= app.prodUrl %></a></p><% } %>
+    </div>
+  </div>
+</div>
+
+<%- include("partials/section", { heading: "Pull requests", sectionNote: "Each PR head gets a check; a passing check merges the PR unless something needs a person." }) %>
+<% if (!pulls.length) { %>
+  <div class="card card--default"><p class="empty-state">No pull requests seen yet. If one is open on GitHub, look for its webhook below, or use Sync with GitHub.</p></div>
+<% } else { %>
+<div class="table-root table-root--primary">
+  <div class="table__scroll-container">
+    <table class="table__content">
+      <thead class="table__header"><tr>
+        <th class="table__column">PR</th><th class="table__column">Head</th><th class="table__column">Status</th><th class="table__column">Check</th><th class="table__column">Note</th><th class="table__column">Updated</th>
+      </tr></thead>
+      <tbody class="table__body">
+      <% for (const { pull, check } of pulls) { %>
+        <tr class="table__row">
+          <td class="table__cell"><a class="link" href="https://github.com/<%= app.repo %>/pull/<%= pull.number %>">#<%= pull.number %></a></td>
+          <td class="table__cell"><%- include("partials/sha", { sha: pull.headSha, shaRepo: app.repo }) %></td>
+          <td class="table__cell"><%- include("partials/badge", { status: pull.status }) %></td>
+          <td class="table__cell">
+            <% if (check) { %>
+              <div class="flex items-center gap-2"><a class="link" href="/apps/<%= app.name %>/jobs/<%= check.id %>">#<%= check.id %></a> <%- include("partials/badge", { status: check.status }) %><% if (check.status === "running") { %> <span class="text-xs text-muted"><%- include("partials/job-time", { job: check }) %></span><% } %></div>
+              <% if (check.commitSha !== pull.headSha) { %><div class="text-xs text-muted">for an older head</div><% } %>
+            <% } else { %><span class="text-muted">none</span><% } %>
+          </td>
+          <td class="table__cell max-w-sm text-muted"><%= pull.note || "" %></td>
+          <td class="table__cell text-muted" title="<%= fmt(pull.updatedAt) %>"><%= ago(pull.updatedAt) %></td>
+        </tr>
+      <% } %>
+      </tbody>
+    </table>
+  </div>
+</div>
+<% } %>
+
+<%- include("partials/section", { heading: "Jobs" }) %>
+<% if (!jobs.length) { %>
+  <div class="card card--default"><p class="empty-state">None yet.</p></div>
+<% } else { %>
+<div class="table-root table-root--primary">
+  <div class="table__scroll-container">
+    <table class="table__content">
+      <thead class="table__header"><tr>
+        <th class="table__column">#</th><th class="table__column">Job</th><th class="table__column">Status</th><th class="table__column">Duration</th><th class="table__column">Requested by</th><th class="table__column">Queued</th><th class="table__column">Result</th>
+      </tr></thead>
+      <tbody class="table__body">
+      <% for (const j of jobs) { %>
+        <tr class="table__row">
+          <td class="table__cell"><a class="link" href="/apps/<%= app.name %>/jobs/<%= j.id %>"><%= j.id %></a></td>
+          <td class="table__cell whitespace-nowrap"><%= jobName(j) %><% if (j.prNumber) { %> · <a class="link" href="https://github.com/<%= app.repo %>/pull/<%= j.prNumber %>">PR #<%= j.prNumber %></a><% } %> <%- include("partials/sha", { sha: j.commitSha, shaRepo: null }) %></td>
+          <td class="table__cell"><%- include("partials/badge", { status: j.status }) %></td>
+          <td class="table__cell whitespace-nowrap"><% if (j.status === "queued") { %><span class="text-muted">waiting</span><% } else { %><%- include("partials/job-time", { job: j }) %><% } %></td>
+          <td class="table__cell"><%= j.requestedBy %></td>
+          <td class="table__cell whitespace-nowrap text-muted" title="<%= fmt(j.createdAt) %>"><%= ago(j.createdAt) %></td>
+          <td class="table__cell max-w-md"><% if (j.error) { %><span class="<%= j.status === "failed" ? "text-danger" : "text-muted" %>"><%= j.failedStep ? j.failedStep + ": " : "" %><%= j.error %></span><% } %></td>
+        </tr>
+      <% } %>
+      </tbody>
+    </table>
+  </div>
+</div>
+<% } %>
+
+<%- include("partials/section", { heading: "Recent webhooks", sectionNote: "What GitHub sent about this app's repo, and what the deployer did.", sectionLink: { href: `/deliveries?app=${encodeURIComponent(app.name)}`, text: "All webhooks →" } }) %>
+<% if (!deliveries.length) { %>
+  <div class="card card--default"><p class="empty-state">None received for this app yet.</p></div>
+<% } else { %>
+<%- include("partials/deliveries-table", { rows: deliveries, showRepo: false }) %>
+<% } %>
+
+<%- include("partials/section", { heading: "Releases" }) %>
+<% if (!releases.length) { %>
+  <div class="card card--default"><p class="empty-state">None yet.</p></div>
+<% } else { %>
+<div class="table-root table-root--primary">
+  <div class="table__scroll-container">
+    <table class="table__content">
+      <thead class="table__header"><tr>
+        <th class="table__column">#</th><th class="table__column">Commit</th><th class="table__column">Status</th><th class="table__column">Built</th><th class="table__column">Image</th>
+      </tr></thead>
+      <tbody class="table__body">
+      <% for (const r of releases) { %>
+        <tr class="table__row">
+          <td class="table__cell"><%= r.id %></td>
+          <td class="table__cell whitespace-nowrap"><%- include("partials/sha", { sha: r.commitSha, shaRepo: app.repo }) %>
+            <% if (staging && staging.id === r.id) { %><span class="chip chip--soft chip--accent chip--sm ms-1"><span class="chip__label">staging</span></span><% } %>
+            <% if (prod && prod.id === r.id) { %><span class="chip chip--soft chip--success chip--sm ms-1"><span class="chip__label">prod</span></span><% } %></td>
+          <td class="table__cell"><%- include("partials/badge", { status: r.status }) %></td>
+          <td class="table__cell whitespace-nowrap text-muted" title="<%= fmt(r.createdAt) %>"><%= ago(r.createdAt) %></td>
+          <td class="table__cell font-mono text-xs text-muted"><%= r.imageDigest ? r.imageDigest.slice(0, 19) : "" %></td>
+        </tr>
+      <% } %>
+      </tbody>
+    </table>
+  </div>
+</div>
+<% } %>
+
+<% const ready = releases.filter((r) => r.status === "ready"); %>
+<% if (ready.length && ["active", "failed"].includes(app.status)) { %>
+<%- include("partials/section", { heading: "Roll back or redeploy", sectionNote: "Rollbacks deploy older code but never reverse database migrations." }) %>
+<form method="post" action="/apps/<%= app.name %>/rollback" class="card card--default flex-row flex-wrap items-end gap-4">
+  <input type="hidden" name="_csrf" value="<%= csrfToken %>">
+  <div class="textfield min-w-64 flex-1">
+    <label class="label" for="release_id">Release</label>
+    <select class="input" id="release_id" name="release_id">
+      <% for (const r of ready) { %>
+        <option value="<%= r.id %>"><%= shortSha(r.commitSha) %> · #<%= r.id %> · <%= fmt(r.createdAt) %><%= staging && staging.id === r.id ? " · on staging" : "" %><%= prod && prod.id === r.id ? " · on prod" : "" %></option>
+      <% } %>
+    </select>
+  </div>
+  <div class="textfield">
+    <label class="label" for="env">Environment</label>
+    <select class="input" id="env" name="env"><option value="staging">staging</option><option value="prod">prod</option></select>
+  </div>
+  <button class="button button--secondary">Deploy</button>
+</form>
+<% } %>
+
+<%- include("partials/section", { heading: "Secrets", sectionNote: "Values are set with <code>/secret set</code> in Claude Code and can't be viewed." }) %>
+<% if (secretError) { %>
+<div class="alert alert--danger" role="alert"><div class="alert__content"><p class="alert__description text-danger"><%= secretError %></p></div></div>
+<% } else if (!secrets.length) { %>
+  <div class="card card--default"><p class="empty-state">No secrets declared in app.yaml.</p></div>
+<% } else { %>
+<div class="table-root table-root--primary">
+  <div class="table__scroll-container">
+    <table class="table__content">
+      <thead class="table__header"><tr><th class="table__column">Name</th><th class="table__column">Staging</th><th class="table__column">Prod</th></tr></thead>
+      <tbody class="table__body">
+      <% for (const s of secrets) { %>
+        <tr class="table__row">
+          <td class="table__cell font-mono text-xs"><%= s.key %></td>
+          <% for (const env of [s.staging, s.prod]) { %>
+            <td class="table__cell"><% if (env.set) { %>set by <%= env.lastSetBy %><div class="text-xs text-muted"><%= fmt(env.lastSetAt) %></div><% } else { %><span class="chip chip--soft chip--danger chip--sm"><span class="chip__label">not set</span></span><% } %></td>
+          <% } %>
+        </tr>
+      <% } %>
+      </tbody>
+    </table>
+  </div>
+</div>
+<% } %>
+
+<%- include("partials/section", { heading: "Teardown" }) %>
+<div class="card card--default border border-danger/30">
+<% if (app.status === "destroy_requested") { %>
+  <p class="text-sm"><b><%= app.destroyRequestedBy %></b> asked to tear down <%= app.name %> on <%= fmt(app.destroyRequestedAt) %>. This deletes prod (keeping a final database snapshot), staging and the shared stack, then archives the repo.</p>
+  <form method="post" action="/apps/<%= app.name %>/destroy" class="flex flex-wrap items-end gap-3">
+    <input type="hidden" name="_csrf" value="<%= csrfToken %>">
+    <div class="textfield min-w-64">
+      <label class="label" for="confirm">Type <code><%= app.name %></code> to confirm</label>
+      <input class="input" type="text" id="confirm" name="confirm" autocomplete="off" required>
+    </div>
+    <button class="button button--danger">Tear down <%= app.name %></button>
+  </form>
+  <form method="post" action="/apps/<%= app.name %>/destroy/cancel">
+    <input type="hidden" name="_csrf" value="<%= csrfToken %>">
+    <button class="button button--tertiary button--sm">Cancel the request</button>
+  </form>
+<% } else if (app.status === "destroying") { %>
+  <p class="text-sm">Teardown in progress: prod, then staging, then shared.</p>
+  <% if (canRetryTeardown) { %>
+  <form method="post" action="/apps/<%= app.name %>/destroy/retry">
+    <input type="hidden" name="_csrf" value="<%= csrfToken %>">
+    <button class="button button--danger button--sm">Retry teardown</button>
+  </form>
+  <% } %>
+<% } else if (app.status === "destroyed") { %>
+  <p class="text-sm text-muted">Torn down. The repo is archived.</p>
+<% } else { %>
+  <p class="text-sm text-muted">The app's owner starts a teardown with <code>/destroy-app</code>; it's confirmed here.</p>
+<% } %>
+</div>
+<%- include("partials/foot") %>

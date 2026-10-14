@@ -1,0 +1,30 @@
+<%- include("partials/head") %>
+<nav class="mb-3 text-sm text-muted"><a class="hover:underline" href="/">Apps</a> <span class="mx-1">/</span> <a class="hover:underline" href="/apps/<%= app.name %>"><%= app.name %></a> <span class="mx-1">/</span> job #<%= job.id %></nav>
+<h1 class="flex flex-wrap items-center gap-3 text-2xl font-semibold tracking-tight">Job #<%= job.id %>: <%= jobName(job) %> <%- include("partials/badge", { status: job.status }) %></h1>
+
+<div class="card card--default mt-6">
+  <dl class="grid gap-x-8 gap-y-3 text-sm sm:grid-cols-2 lg:grid-cols-4">
+    <% if (release) { %><div><dt class="text-xs text-muted">Release</dt><dd><%- include("partials/sha", { sha: release.commitSha, shaRepo: app.repo }) %> <span class="text-muted">#<%= release.id %></span></dd></div><% } %>
+    <% if (job.commitSha && !release) { %><div><dt class="text-xs text-muted">Commit</dt><dd><%- include("partials/sha", { sha: job.commitSha, shaRepo: app.repo }) %></dd></div><% } %>
+    <% if (job.prNumber) { %><div><dt class="text-xs text-muted">Pull request</dt><dd><a class="link" href="https://github.com/<%= app.repo %>/pull/<%= job.prNumber %>">#<%= job.prNumber %></a></dd></div><% } %>
+    <div><dt class="text-xs text-muted">Requested by</dt><dd><%= job.requestedBy %></dd></div>
+    <div><dt class="text-xs text-muted">Queued</dt><dd title="<%= fmt(job.createdAt) %>"><%= fmt(job.createdAt) %></dd></div>
+    <div><dt class="text-xs text-muted">Started</dt><dd><%= job.startedAt ? fmt(job.startedAt) : (job.status === "queued" ? "waiting" : "never") %></dd></div>
+    <div><dt class="text-xs text-muted">Finished</dt><dd><%= job.finishedAt ? fmt(job.finishedAt) : "" %></dd></div>
+    <% if (job.startedAt && (job.status === "running" || job.finishedAt)) { %><div><dt class="text-xs text-muted"><%= job.status === "running" ? "Running for" : "Took" %></dt><dd><%- include("partials/job-time", { job }) %></dd></div><% } %>
+    <% if (job.afterJobId) { %><div><dt class="text-xs text-muted">Waits for</dt><dd><a class="link" href="/apps/<%= app.name %>/jobs/<%= job.afterJobId %>">job #<%= job.afterJobId %></a></dd></div><% } %>
+    <% if (job.runId) { %><div><dt class="text-xs text-muted">Runner run</dt><dd class="font-mono text-xs"><%= job.runId %></dd></div><% } %>
+  </dl>
+</div>
+<% if (job.error) { %>
+<div class="alert <%= job.status === "failed" ? "alert--danger" : "alert--default" %> mt-4" role="alert">
+  <div class="alert__content">
+    <p class="alert__title"><%= job.status === "failed" ? (job.failedStep ? "Failed in step " + job.failedStep : "Failed") : "Note" %></p>
+    <p class="alert__description"><%= job.error %></p>
+  </div>
+</div>
+<% } %>
+
+<%- include("partials/section", { heading: "Log", sectionNote: locals.refresh ? `The last 500 lines. This page reloads every ${refresh} seconds until the job finishes.` : "The last 500 lines." }) %>
+<pre class="log"><%= log.join("\n") || "(empty)" %></pre>
+<%- include("partials/foot") %>

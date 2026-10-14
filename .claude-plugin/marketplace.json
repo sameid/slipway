@@ -1,0 +1,15 @@
+{
+  "name": "slipway",
+  "owner": {
+    "name": "sameid"
+  },
+  "description": "The slipway plugin for Claude Code: build, ship and run internal apps.",
+  "plugins": [
+    {
+      "name": "slipway",
+      "source": "./plugin",
+      "description": "Create, ship and run slipway apps.",
+      "category": "development"
+    }
+  ]
+}

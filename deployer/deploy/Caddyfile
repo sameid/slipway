@@ -1,0 +1,46 @@
+# Caddy on the deployer instance (docs/contracts.md, "Deployer host").
+# update-deployer.sh validates it and installs it as /etc/caddy/Caddyfile.
+#
+# CloudFront terminates HTTPS and reaches the instance as a custom origin over
+# HTTP on 8080, at its Elastic IP. The security group only admits CloudFront's
+# origin-facing addresses, and CloudFront adds X-Slipway-Origin with a secret
+# only our distribution knows, so requests from any other distribution get 403.
+# The secret comes from /etc/slipway/caddy.env (caddy.service loads it).
+#
+# Caddy proxies to the deployer on 127.0.0.1:3000. CloudFront's headers
+# (CloudFront-Forwarded-Proto, CloudFront-Viewer-Address) pass through untouched;
+# the deployer uses them for Secure cookies and login rate limits.
+{
+	auto_https off
+	# Used by `caddy reload` (caddy.service). The build user and Docker
+	# containers can't reach it: the host's nftables rules block port 2019.
+	admin localhost:2019
+}
+
+:8080 {
+	# Fail closed: with the secret unset or short, nothing matches.
+	@cloudfront expression `{http.request.header.X-Slipway-Origin} == "{$SLIPWAY_ORIGIN_SECRET}" && size("{$SLIPWAY_ORIGIN_SECRET}") >= 32`
+
+	handle @cloudfront {
+		# The deployer doesn't need to see the secret.
+		reverse_proxy 127.0.0.1:3000 {
+			header_up -X-Slipway-Origin
+		}
+	}
+
+	handle {
+		respond "Forbidden" 403
+	}
+
+	# The deployer is restarting (a release) or down: say so instead of a bare 502.
+	handle_errors 502 503 504 {
+		header Content-Type "text/plain; charset=utf-8"
+		header Retry-After 30
+		respond "The slipway deployer is restarting. Try again in a minute." 503
+	}
+
+	log {
+		output stdout
+		format console
+	}
+}

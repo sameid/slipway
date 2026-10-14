@@ -1,0 +1,9 @@
+<%- include("partials/head") %>
+<div class="mx-auto mt-12 max-w-md">
+  <div class="card card--default gap-3 p-6">
+    <h1 class="text-xl font-semibold tracking-tight"><%= title %></h1>
+    <p class="text-sm"><%= message %></p>
+    <% if (locals.user) { %><div><a class="button button--secondary button--sm" href="/">Back to apps</a></div><% } %>
+  </div>
+</div>
+<%- include("partials/foot") %>

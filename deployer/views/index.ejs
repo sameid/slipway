@@ -1,0 +1,94 @@
+<%- include("partials/head") %>
+<div class="flex flex-wrap items-end justify-between gap-4">
+  <div>
+    <h1 class="text-2xl font-semibold tracking-tight">Apps</h1>
+    <p class="mt-1 text-sm text-muted">Colleagues create apps with <code>/new-app</code>. Merges to main deploy to staging; promote to prod from an app's page.</p>
+  </div>
+</div>
+
+<div class="mt-6 grid gap-3 sm:grid-cols-3">
+  <div class="card card--default">
+    <p class="card__description">Apps</p>
+    <p class="text-2xl font-semibold"><%= list.length %></p>
+    <p class="text-xs text-muted"><%= list.filter((l) => l.app.status === "active").length %> active</p>
+  </div>
+  <div class="card card--default">
+    <p class="card__description">Jobs in progress</p>
+    <p class="text-2xl font-semibold"><%= active.filter((j) => j.status === "running").length %> <span class="text-base font-normal text-muted">running</span></p>
+    <p class="text-xs text-muted"><%= active.filter((j) => j.status === "queued").length %> queued</p>
+  </div>
+  <a class="card card--default transition-colors hover:bg-surface-secondary" href="/deliveries">
+    <p class="card__description">Last webhook from GitHub</p>
+    <% if (lastDelivery) { %>
+      <p class="flex items-center gap-2 text-2xl font-semibold"><%= ago(lastDelivery.receivedAt) %> <%- include("partials/badge", { status: lastDelivery.outcome }) %></p>
+      <p class="truncate text-xs text-muted"><%= lastDelivery.summary || lastDelivery.event %><%= lastDelivery.repo ? " · " + lastDelivery.repo : "" %></p>
+    <% } else { %>
+      <p class="text-2xl font-semibold text-muted">None yet</p>
+      <p class="text-xs text-muted">Check the GitHub App's webhook URL and secret</p>
+    <% } %>
+  </a>
+</div>
+
+<% if (active.length) { %>
+<%- include("partials/section", { heading: "In progress", sectionNote: "Builds, checks and deploys that are running or waiting their turn." }) %>
+<div class="table-root table-root--primary">
+  <div class="table__scroll-container">
+    <table class="table__content">
+      <thead class="table__header"><tr>
+        <th class="table__column">Job</th><th class="table__column">App</th><th class="table__column">Status</th><th class="table__column">Running for</th><th class="table__column">Queued</th>
+      </tr></thead>
+      <tbody class="table__body">
+      <% for (const j of active) { %>
+        <tr class="table__row">
+          <td class="table__cell"><a class="link" href="/apps/<%= j.app %>/jobs/<%= j.id %>">#<%= j.id %> <%= jobName(j) %></a><% if (j.prNumber) { %> <span class="text-muted">· PR #<%= j.prNumber %></span><% } %></td>
+          <td class="table__cell"><a class="link" href="/apps/<%= j.app %>"><%= j.app %></a></td>
+          <td class="table__cell"><%- include("partials/badge", { status: j.status }) %></td>
+          <td class="table__cell"><% if (j.startedAt) { %><%- include("partials/job-time", { job: j }) %><% } else { %><span class="text-muted">waiting</span><% } %></td>
+          <td class="table__cell text-muted"><%= ago(j.createdAt) %></td>
+        </tr>
+      <% } %>
+      </tbody>
+    </table>
+  </div>
+</div>
+<% } %>
+
+<%- include("partials/section", { heading: "All apps" }) %>
+<% if (!list.length) { %>
+  <div class="card card--default"><p class="empty-state">No apps yet.</p></div>
+<% } else { %>
+<div class="table-root table-root--primary">
+  <div class="table__scroll-container">
+    <table class="table__content">
+      <thead class="table__header"><tr>
+        <th class="table__column">App</th><th class="table__column">Status</th><th class="table__column">Staging</th><th class="table__column">Prod</th><th class="table__column">Last deploy</th><th class="table__column">Owner</th>
+      </tr></thead>
+      <tbody class="table__body">
+      <% for (const { app, staging, prod, lastDeploy } of list) { %>
+        <tr class="table__row">
+          <td class="table__cell">
+            <a class="font-semibold hover:underline" href="/apps/<%= app.name %>"><%= app.name %></a>
+            <div class="text-xs text-muted"><%= app.repo %></div>
+          </td>
+          <td class="table__cell"><%- include("partials/badge", { status: app.status }) %></td>
+          <% for (const [release, url] of [[staging, app.stagingUrl], [prod, app.prodUrl]]) { %>
+          <td class="table__cell">
+            <% if (release) { %><%- include("partials/sha", { sha: release.commitSha, shaRepo: app.repo }) %><% } else { %><span class="text-muted">none</span><% } %>
+            <% if (url) { %><a class="link ms-2 text-xs" href="<%= url %>">open ↗</a><% } %>
+          </td>
+          <% } %>
+          <td class="table__cell">
+            <% if (lastDeploy) { %>
+              <div class="flex items-center gap-2"><a class="link" href="/apps/<%= app.name %>/jobs/<%= lastDeploy.id %>"><%= jobName(lastDeploy) %></a> <%- include("partials/badge", { status: lastDeploy.status }) %></div>
+              <div class="text-xs text-muted" title="<%= fmt(lastDeploy.finishedAt || lastDeploy.createdAt) %>"><%= ago(lastDeploy.finishedAt || lastDeploy.createdAt) %></div>
+            <% } else { %><span class="text-muted">none</span><% } %>
+          </td>
+          <td class="table__cell"><%= app.owner %></td>
+        </tr>
+      <% } %>
+      </tbody>
+    </table>
+  </div>
+</div>
+<% } %>
+<%- include("partials/foot") %>

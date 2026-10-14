@@ -1,0 +1,66 @@
+/*
+ * The dashboard's stylesheet, compiled to views/static/app.css by `npm run build:css`
+ * (part of `npm run build`). Pages are server-rendered EJS that use HeroUI v3's
+ * framework-agnostic component classes (button, card, chip, table-root, alert,
+ * input, ...; https://heroui.com) and Tailwind utilities. There's no React.
+ */
+@layer theme, base, components, utilities;
+
+@import "tailwindcss";
+@import "@heroui/styles/base" layer(base);
+@import "@heroui/styles/themes/default" layer(theme);
+@import "@heroui/styles/utilities";
+@import "@heroui/styles/variants";
+
+/* Only the HeroUI components the views use. */
+@import "@heroui/styles/components/alert.css" layer(components);
+@import "@heroui/styles/components/button.css" layer(components);
+@import "@heroui/styles/components/card.css" layer(components);
+@import "@heroui/styles/components/chip.css" layer(components);
+@import "@heroui/styles/components/description.css" layer(components);
+@import "@heroui/styles/components/empty-state.css" layer(components);
+@import "@heroui/styles/components/input.css" layer(components);
+@import "@heroui/styles/components/label.css" layer(components);
+@import "@heroui/styles/components/link.css" layer(components);
+@import "@heroui/styles/components/table.css" layer(components);
+@import "@heroui/styles/components/textfield.css" layer(components);
+
+@source "../views";
+
+@layer components {
+  /* A job's log: always dark, like a terminal. */
+  .log {
+    @apply max-h-[70vh] overflow-auto rounded-2xl bg-[oklch(0.18_0.005_285)] p-4 font-mono text-xs leading-relaxed whitespace-pre-wrap break-words text-[oklch(0.92_0_0)];
+  }
+
+  /* HeroUI links are the text colour; in tables they need to stand out. */
+  .link {
+    @apply text-accent;
+  }
+
+  .sha {
+    @apply rounded-md bg-default px-1.5 py-0.5 font-mono text-xs text-default-foreground;
+  }
+
+  /* Native <select>s, which HeroUI's Select (a React Aria popover) doesn't cover.
+     The chevron is a file because the CSP doesn't allow data: images. */
+  select.input {
+    @apply appearance-none bg-[length:1rem] bg-[right_0.6rem_center] bg-no-repeat pe-8;
+    background-image: url("/static/chevron.svg");
+  }
+
+  /* In HeroUI's dark theme a field is the same colour as a card, so a field on a
+     card (the sign-in form, for one) disappears. Use the default fill there instead;
+     these selectors outrank HeroUI's own resting, hover and focus backgrounds. */
+  [data-theme="dark"] .card .input,
+  [data-theme="dark"] .card .input:hover {
+    background-color: var(--default);
+  }
+
+  .nav-link {
+    @apply rounded-xl px-3 py-1.5 text-sm font-medium text-muted transition-colors hover:bg-default hover:text-foreground;
+  }
+  .nav-link[aria-current="page"] {
+    @apply bg-default text-foreground;
+  }
+}

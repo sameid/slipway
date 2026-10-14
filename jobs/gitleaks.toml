@@ -1,0 +1,15 @@
+# Platform gitleaks config for build-release's secret-scan step: gitleaks'
+# default rules, minus dependencies and build output. Passed with --config, so
+# an app repo's own .gitleaks.toml can't weaken the scan.
+title = "slipway"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Dependencies, build output and lockfiles"
+paths = [
+  '''(^|/)node_modules/''',
+  '''(^|/)dist/''',
+  '''(^|/)package-lock\.json$''',
+]

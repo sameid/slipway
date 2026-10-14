@@ -1,0 +1,29 @@
+<%# Webhook deliveries (rows), newest first. showRepo adds the repo and app column. %>
+<div class="table-root table-root--primary">
+  <div class="table__scroll-container">
+    <table class="table__content">
+      <thead class="table__header"><tr>
+        <th class="table__column">Received</th><th class="table__column">Event</th><% if (showRepo) { %><th class="table__column">Repo</th><% } %><th class="table__column">Outcome</th><th class="table__column">What happened</th>
+      </tr></thead>
+      <tbody class="table__body">
+      <% for (const d of rows) { %>
+        <tr class="table__row">
+          <td class="table__cell whitespace-nowrap" title="<%= fmt(d.receivedAt) %>"><%= ago(d.receivedAt) %><div class="text-xs text-muted"><%= fmt(d.receivedAt) %></div></td>
+          <td class="table__cell">
+            <div><%= d.summary || d.event %></div>
+            <div class="hidden font-mono text-xs text-muted sm:block" title="X-GitHub-Delivery"><%= d.deliveryId || "" %></div>
+          </td>
+          <% if (showRepo) { %>
+          <td class="table__cell"><% if (d.app) { %><a class="link" href="/apps/<%= d.app %>"><%= d.app %></a><% } %><div class="text-xs text-muted"><%= d.repo || "" %></div></td>
+          <% } %>
+          <td class="table__cell"><%- include("badge", { status: d.outcome }) %></td>
+          <td class="table__cell max-w-md">
+            <span class="<%= d.outcome === "failed" || d.outcome === "rejected" ? "text-danger" : "" %>"><%= d.detail || "" %></span>
+            <% if (d.jobId && d.app) { %> <a class="link" href="/apps/<%= d.app %>/jobs/<%= d.jobId %>">open →</a><% } %>
+          </td>
+        </tr>
+      <% } %>
+      </tbody>
+    </table>
+  </div>
+</div>

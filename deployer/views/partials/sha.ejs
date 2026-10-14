@@ -1,0 +1,2 @@
+<%# A short commit hash, linked to GitHub when shaRepo is given. %>
+<% if (sha) { %><% if (locals.shaRepo) { %><a class="sha hover:underline" href="https://github.com/<%= shaRepo %>/commit/<%= sha %>"><%= sha.slice(0, 7) %></a><% } else { %><span class="sha"><%= sha.slice(0, 7) %></span><% } %><% } %>

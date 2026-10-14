@@ -1,0 +1,215 @@
+#!/bin/bash
+# First-boot setup for the slipway deployer host (Amazon Linux 2023, x86_64):
+# tools, users, isolation, Caddy, pm2, then the release named in
+# /slipway/deployer/version (docs/contracts.md, "Runner" and "Deployer host").
+# Rendered by Terraform from foundation/templates/user-data.sh.tftpl; it runs
+# once per instance. Output: /var/log/cloud-init-output.log
+set -euo pipefail
+
+NODE_VERSION="${node_version}"
+NODE_SHA256="${node_sha256}"
+PM2_VERSION="${pm2_version}"
+CADDY_VERSION="${caddy_version}"
+CADDY_SHA512="${caddy_sha512}"
+PM2_LOGROTATE_VERSION="${pm2_logrotate_version}"
+SWAP_GB="${swap_gb}"
+
+dnf install -y --setopt=install_weak_deps=False \
+  dnf-automatic tar xz gzip unzip jq acl awscli-2 docker nftables sudo
+
+# Apply security updates automatically (design 5.5). AL2023 pins a release
+# version, so this patches within it; moving to a newer AL2023 release is a
+# deliberate instance replacement.
+sed -i \
+  -e 's/^upgrade_type *=.*/upgrade_type = security/' \
+  -e 's/^apply_updates *=.*/apply_updates = yes/' \
+  /etc/dnf/automatic.conf
+systemctl enable --now dnf-automatic.timer
+
+# --- Swap: a t3.small has 2 GB; builds spill into swap instead of being killed.
+if ! swapon --show=NAME --noheadings | grep -qx /swapfile; then
+  dd if=/dev/zero of=/swapfile bs=1M count=$((SWAP_GB * 1024)) status=none
+  chmod 0600 /swapfile
+  mkswap /swapfile
+  swapon /swapfile
+  echo '/swapfile none swap defaults 0 0' >> /etc/fstab
+fi
+echo 'vm.swappiness = 10' > /etc/sysctl.d/90-slipway.conf
+sysctl -q -p /etc/sysctl.d/90-slipway.conf
+
+# --- Users (docs/contracts.md, "Runner"). pm2 starts processes with only their
+# primary group (libuv drops supplementary groups), so access is arranged
+# through owners and primary groups rather than group memberships.
+mkuser() { id "$1" >/dev/null 2>&1 || useradd --system --user-group --home-dir "$2" --shell /sbin/nologin "$1"; }
+mkuser slipway /var/lib/slipway
+mkuser slipway-runner /var/lib/slipway-runner
+mkuser slipway-build /var/lib/slipway-build
+mkuser caddy /var/lib/caddy
+
+install -d -o slipway -g slipway -m 0700 /var/lib/slipway
+install -d -o slipway-runner -g slipway-runner -m 0750 /var/lib/slipway-runner /var/lib/slipway-runner/runs
+# slipway-build may pass through to the work directory of the run it's
+# working on; the runner grants it the same on that run's directory only.
+setfacl -m u:slipway-build:x /var/lib/slipway-runner /var/lib/slipway-runner/runs
+install -d -o slipway-build -g slipway-build -m 0700 /var/lib/slipway-build /var/lib/slipway-build/.npm
+install -d -o caddy -g caddy -m 0750 /var/lib/caddy
+install -d -m 0755 /opt/slipway /opt/slipway/bin /opt/slipway/releases /opt/slipway/tools /etc/caddy
+install -d -o root -g root -m 0755 /etc/slipway
+
+# The runner's socket directory. setgid with group slipway, so the socket the
+# runner creates belongs to the deployer's group (the runner makes it 0660).
+cat > /etc/tmpfiles.d/slipway.conf <<'EOF'
+d /run/slipway 2750 slipway-runner slipway -
+EOF
+systemd-tmpfiles --create /etc/tmpfiles.d/slipway.conf
+
+# The runner starts untrusted build steps as slipway-build, and nothing else.
+cat > /etc/sudoers.d/slipway-runner <<'EOF'
+slipway-runner ALL=(slipway-build) NOPASSWD: ALL
+EOF
+chmod 0440 /etc/sudoers.d/slipway-runner
+# /usr/local/bin for `sudo pm2 ...` from a Session Manager shell.
+cat > /etc/sudoers.d/slipway-path <<'EOF'
+Defaults secure_path = /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+EOF
+chmod 0440 /etc/sudoers.d/slipway-path
+visudo -c -q
+
+# No instance metadata (so no AWS credentials) and no deployer, Caddy or
+# Caddy admin ports for slipway-build; no deployer ports for containers.
+echo '${nftables_b64}' | base64 -d > /etc/nftables/slipway.nft
+cat > /etc/systemd/system/slipway-nftables.service <<'EOF'
+[Unit]
+Description=slipway firewall rules for build isolation
+Wants=network-pre.target
+Before=network-pre.target docker.service
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/nftables/slipway.nft
+ExecReload=/usr/sbin/nft -f /etc/nftables/slipway.nft
+ExecStop=/usr/sbin/nft delete table inet slipway
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl daemon-reload
+systemctl enable --now slipway-nftables
+
+# --- Configuration ---------------------------------------------------------------
+cat > /etc/slipway/deployer.env <<'ENVFILE'
+${deployer_env_file}
+ENVFILE
+chown root:slipway /etc/slipway/deployer.env
+chmod 0640 /etc/slipway/deployer.env
+
+cat > /etc/slipway/runner.env <<'ENVFILE'
+${runner_env_file}
+ENVFILE
+chown root:slipway-runner /etc/slipway/runner.env
+chmod 0640 /etc/slipway/runner.env
+
+# The secret header CloudFront adds to every request (foundation/deployer.tf).
+# Caddy rejects requests without it, so only our distribution gets through.
+umask 027
+printf 'SLIPWAY_ORIGIN_SECRET=%s\n' '${origin_secret}' > /etc/slipway/caddy.env
+umask 022
+chown root:caddy /etc/slipway/caddy.env
+chmod 0640 /etc/slipway/caddy.env
+
+# --- Docker: image builds. The socket belongs to the runner's own group. -----
+# (dockerd runs with -H fd://, so systemd's docker.socket owns the socket.)
+cat > /etc/docker/daemon.json <<'EOF'
+{
+  "log-driver": "json-file",
+  "log-opts": { "max-size": "10m", "max-file": "3" }
+}
+EOF
+install -d /etc/systemd/system/docker.socket.d
+printf '[Socket]\nSocketGroup=slipway-runner\n' > /etc/systemd/system/docker.socket.d/slipway.conf
+cat > /etc/systemd/system/slipway-docker-prune.service <<'EOF'
+[Unit]
+Description=Remove Docker images and build cache older than two days
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/docker system prune --all --force --filter until=48h
+ExecStart=/usr/bin/docker builder prune --all --force --filter until=48h
+EOF
+cat > /etc/systemd/system/slipway-docker-prune.timer <<'EOF'
+[Unit]
+Description=Daily Docker cleanup for slipway builds
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=1h
+Persistent=true
+[Install]
+WantedBy=timers.target
+EOF
+systemctl daemon-reload
+systemctl enable --now docker slipway-docker-prune.timer
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+
+# --- Node.js and pm2 ---------------------------------------------------------------
+curl -fsSL --retry 5 -o "$work/node.tar.xz" \
+  "https://nodejs.org/dist/v$NODE_VERSION/node-v$NODE_VERSION-linux-x64.tar.xz"
+echo "$NODE_SHA256  $work/node.tar.xz" | sha256sum -c -
+install -d "/opt/slipway/node-v$NODE_VERSION"
+tar -xJf "$work/node.tar.xz" --strip-components=1 -C "/opt/slipway/node-v$NODE_VERSION"
+ln -sfn "/opt/slipway/node-v$NODE_VERSION" /opt/slipway/node
+ln -sfn /opt/slipway/node/bin/node /usr/local/bin/node
+ln -sfn /opt/slipway/node/bin/npm /usr/local/bin/npm
+ln -sfn /opt/slipway/node/bin/npx /usr/local/bin/npx
+export PATH="/opt/slipway/node/bin:/usr/local/bin:$PATH"
+
+npm install --global --no-audit --no-fund "pm2@$PM2_VERSION"
+echo '${pm2_wrapper_b64}' | base64 -d > /usr/local/bin/pm2
+chmod 0755 /usr/local/bin/pm2
+export PM2_HOME=/root/.pm2
+# pm2-root.service resurrects the saved process list at boot.
+pm2 startup systemd -u root --hp /root
+# pm2-logrotate rotates every app's logs in /root/.pm2/logs: daily or at 10 MB,
+# keeping 14 compressed files per app. pm2 restarts the module with the daemon.
+pm2 install "pm2-logrotate@$PM2_LOGROTATE_VERSION"
+pm2 set pm2-logrotate:max_size 10M
+pm2 set pm2-logrotate:retain 14
+pm2 set pm2-logrotate:compress true
+pm2 set pm2-logrotate:rotateInterval '0 0 * * *'
+pm2 save
+
+# --- Caddy: listens on ${caddy_port} for CloudFront --------------------------------
+curl -fsSL --retry 5 -o "$work/caddy.tar.gz" \
+  "https://github.com/caddyserver/caddy/releases/download/v$CADDY_VERSION/caddy_$${CADDY_VERSION}_linux_amd64.tar.gz"
+echo "$CADDY_SHA512  $work/caddy.tar.gz" | sha512sum -c -
+tar -xzf "$work/caddy.tar.gz" -C "$work" caddy
+install -m 0755 "$work/caddy" /usr/local/bin/caddy
+echo '${caddy_svc_b64}' | base64 -d > /etc/systemd/system/caddy.service
+# Placeholder until the first release installs its Caddyfile: proves the
+# CloudFront -> Caddy path (and the origin header check) before anything else
+# runs. Requests without CloudFront's secret header get 403.
+cat > /etc/caddy/Caddyfile <<'EOF'
+{
+	auto_https off
+	admin localhost:2019
+}
+
+:${caddy_port} {
+	@cloudfront header X-Slipway-Origin {$SLIPWAY_ORIGIN_SECRET}
+	handle @cloudfront {
+		respond "slipway deployer: no release installed yet" 503
+	}
+	respond 403
+}
+EOF
+systemctl daemon-reload
+systemctl enable --now caddy
+
+# --- Scripts ---------------------------------------------------------------------------
+echo '${update_script_b64}' | base64 -d > /opt/slipway/bin/update-deployer.sh
+echo '${create_admin_b64}' | base64 -d > /opt/slipway/bin/create-admin
+chmod 0755 /opt/slipway/bin/update-deployer.sh /opt/slipway/bin/create-admin
+
+# Install and start the release named in /slipway/deployer/version. Before
+# the first release is published this installs nothing and exits cleanly;
+# deployer/scripts/release.sh runs the same script later through SSM.
+/opt/slipway/bin/update-deployer.sh

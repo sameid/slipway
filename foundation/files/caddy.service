@@ -1,0 +1,30 @@
+# Caddy in front of the deployer (docs/contracts.md, "Deployer host"). Based on
+# Caddy's own unit. The Caddyfile comes from each release; user data installs
+# a placeholder that answers 503 until the first release.
+# The origin secret comes from /etc/slipway/caddy.env (user data).
+[Unit]
+Description=Caddy (slipway deployer proxy)
+Documentation=https://caddyserver.com/docs/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+User=caddy
+Group=caddy
+# SLIPWAY_ORIGIN_SECRET: the header value CloudFront adds to every request;
+# the Caddyfile only proxies requests that carry it. Refuse to start without
+# it, since an empty value would match requests that have no header at all.
+EnvironmentFile=/etc/slipway/caddy.env
+ExecStartPre=/bin/sh -c 'test $${#SLIPWAY_ORIGIN_SECRET} -ge 32 || { echo "SLIPWAY_ORIGIN_SECRET missing or too short in /etc/slipway/caddy.env" >&2; exit 1; }'
+ExecStart=/usr/local/bin/caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
+ExecReload=/usr/local/bin/caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile --force
+TimeoutStopSec=5s
+LimitNOFILE=1048576
+PrivateTmp=true
+ProtectSystem=full
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

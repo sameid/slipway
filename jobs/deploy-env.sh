@@ -1,0 +1,389 @@
+#!/usr/bin/env bash
+# shellcheck source-path=SCRIPTDIR
+# deploy-env (design 5.6): apply or destroy one of an app's stacks.
+#
+# Inputs (env): APP, ENV (shared | staging | prod), ACTION (apply | destroy),
+#   and for staging/prod apply: COMMIT_SHA, IMAGE_DIGEST, WEB_ARTIFACT, DEPLOY_ID.
+# From the runner: RELEASES_BUCKET, STATE_BUCKET, AWS_ACCOUNT_ID, SLIPWAY_HOME,
+#   SLIPWAY_WORK, SLIPWAY_EXPORTS, and AWS_PROFILE=slipway-deploy for credentials.
+#   It never runs app code: app.yaml is only parsed.
+# Exports (staging/prod apply): APP_URL, SERVICE_URL.
+#
+# staging/prod apply:
+#   secrets-check     every name under secrets: in app.yaml has a parameter for this env
+#   terraform-phase1  migrate task -> new image; the service keeps its image, release and deploy id
+#   migrate           one-off Fargate task; stop here if it fails
+#   rollout-settings  shorter canary waits and faster health checks on the service
+#                     (best effort; skipped on the first deploy, before the service exists)
+#   terraform-phase2  service -> new image (first deploy: creates the service and CloudFront),
+#                     then the rollout settings again
+#   web-sync          frontend + config.json to S3, invalidate CloudFront
+#   health-check      <app url><health_check> reports the new release
+
+# shellcheck source=lib.sh
+source "$(dirname "$0")/lib.sh"
+
+require_env APP ENV ACTION STATE_BUCKET RELEASES_BUCKET AWS_ACCOUNT_ID SLIPWAY_WORK
+[[ "$APP" =~ ^[a-z][a-z0-9-]{1,18}[a-z0-9]$ ]] || die "invalid APP '$APP'"
+case "$ENV" in shared | staging | prod) ;; *) die "ENV must be shared, staging or prod, not '$ENV'" ;; esac
+case "$ACTION" in apply | destroy) ;; *) die "ACTION must be apply or destroy, not '$ACTION'" ;; esac
+reset_exports
+
+# The generated root config, with module sources relative to $SLIPWAY_HOME/modules.
+WORK_DIR="$SLIPWAY_WORK/tf"
+TMP="$SLIPWAY_WORK/tmp"
+mkdir -p "$WORK_DIR" "$TMP"
+# Providers are shared between runs; terraform init isn't safe to run twice at
+# once against one cache, so inits take a lock.
+export TF_PLUGIN_CACHE_DIR="${TF_PLUGIN_CACHE_DIR:-$HOME/.terraform.d/plugin-cache}"
+mkdir -p "$TF_PLUGIN_CACHE_DIR"
+
+tf() { terraform -chdir="$WORK_DIR" "$@"; }
+# One output of the last apply. Before the first apply there's no state and
+# terraform prints nothing; an output an older state doesn't have yet is "" too.
+# Any other failure (terraform output reads the state from S3) is retried, then
+# stops the deploy: carrying on with "" isn't safe. An empty service_image tells
+# the module to remove the service, and an empty security group once started the
+# migrate task where the database couldn't be reached.
+tf_out() {
+  local value attempt
+  for attempt in 1 2 3; do
+    if value=$(tf output -raw -no-color "$1" 2>"$TMP/tf-output.err"); then
+      printf '%s' "$value"
+      return 0
+    fi
+    grep -q "Output \"$1\" not found" "$TMP/tf-output.err" && return 0
+    ((attempt == 3)) || sleep 5
+  done
+  die "terraform output $1 failed: $(grep -v '^[[:space:]]*$' "$TMP/tf-output.err" | head -n 3 | tr '\n' ' ')"
+}
+# An output the next command can't do without. Assign it to a variable first:
+# set -e doesn't catch a failing $(...) that's only an argument to a command.
+tf_req() {
+  local value
+  value=$(tf_out "$1") || exit 1
+  [[ -n "$value" ]] || die "terraform output $1 is empty"
+  printf '%s' "$value"
+}
+tf_init() {
+  if command -v flock >/dev/null; then
+    flock "$TF_PLUGIN_CACHE_DIR/.init.lock" terraform -chdir="$WORK_DIR" init -input=false -no-color -reconfigure
+  else
+    tf init -input=false -no-color -reconfigure
+  fi
+}
+tf_apply() { tf apply -input=false -auto-approve -no-color -lock-timeout=10m "$@"; }
+tf_destroy() { tf destroy -input=false -auto-approve -no-color -lock-timeout=10m "$@"; }
+
+render_env() { # extra args: --app-yaml FILE | --inputs-json FILE
+  appyaml render-env --app "$APP" --env "$ENV" --out-dir "$WORK_DIR" --modules-dir "$SLIPWAY_HOME/modules" \
+    --state-bucket "$STATE_BUCKET" --region "$AWS_REGION" "$@"
+}
+
+# Parameter names under /apps/<app>/<env>/, one per line.
+secret_parameters() {
+  aws ssm describe-parameters \
+    --parameter-filters "Key=Path,Option=OneLevel,Values=/apps/$APP/$ENV" \
+    --query 'Parameters[].Name' --output text | tr '\t' '\n' | sed '/^$/d;/^None$/d'
+}
+
+delete_secret_parameters() {
+  local names
+  mapfile -t names < <(secret_parameters)
+  while ((${#names[@]})); do
+    aws ssm delete-parameters --names "${names[@]:0:10}" --query 'DeletedParameters' --output text
+    names=("${names[@]:10}")
+  done
+}
+
+# Express Mode rolls a new image out as a canary: 5% of traffic for a bake time,
+# then all of it for another bake time before the old tasks stop (3 minutes
+# each by default), and its target groups want 5 passing health checks 30
+# seconds apart before a task gets traffic. That was 8 of a staging deploy's 12
+# minutes. aws_ecs_express_gateway_service has no arguments for any of it, but
+# Express Mode leaves these editable on the ECS service and its target groups
+# (only the CANARY strategy itself is fixed), so they're set there. Staging
+# skips the waits; prod keeps short ones so the rollback alarm can still stop a
+# bad release.
+HEALTH_CHECK_INTERVAL=10
+HEALTHY_THRESHOLD=2
+
+# Prints each setting as it was, and what it changed. Stops at the first failed
+# call (set -e doesn't apply here: rollout_settings calls it from ||).
+set_rollout_settings() { # cluster service
+  local cluster=$1 service=$2 canary=2 final=1 config want was raw tg interval healthy
+  [[ "$ENV" != staging ]] || { canary=0 final=0; }
+  config=$(aws ecs describe-services --cluster "$cluster" --services "$service" \
+    --query 'services[0].deploymentConfiguration' --output json) || return 1
+  if [[ "$(jq -r .strategy <<<"$config")" != CANARY ]]; then
+    echo "rollout waits: $service doesn't roll out as a canary; left alone"
+  else
+    want=$(jq -c --argjson canary "$canary" --argjson final "$final" \
+      '.canaryConfiguration.canaryBakeTimeInMinutes = $canary | .bakeTimeInMinutes = $final' <<<"$config") || return 1
+    was=$(jq -r '"canary \(.canaryConfiguration.canaryBakeTimeInMinutes)m, then \(.bakeTimeInMinutes)m"' <<<"$config") || return 1
+    if [[ "$(jq -cS . <<<"$config")" == "$(jq -cS . <<<"$want")" ]]; then
+      echo "rollout waits: $was (already set)"
+    else
+      aws ecs update-service --cluster "$cluster" --service "$service" --deployment-configuration "$want" \
+        --query 'service.serviceName' --output text >/dev/null || return 1
+      echo "rollout waits: $was -> canary ${canary}m, then ${final}m"
+    fi
+  fi
+
+  # The service's revision names both of its target groups: each rollout moves
+  # traffic from one to the other.
+  raw=$(aws ecs list-service-deployments --cluster "$cluster" --service "$service" \
+    --query 'serviceDeployments[0].targetServiceRevisionArn' --output text) || return 1
+  [[ "$raw" == arn:* ]] || { echo "health checks: $service has no deployments yet"; return 1; }
+  raw=$(aws ecs describe-service-revisions --service-revision-arns "$raw" \
+    --query 'serviceRevisions[0].loadBalancers[].[targetGroupArn, advancedConfiguration.alternateTargetGroupArn]' \
+    --output text) || return 1
+  local tgs=()
+  mapfile -t tgs < <(tr '\t' '\n' <<<"$raw" | sed '/^None$/d;/^$/d' | sort -u)
+  ((${#tgs[@]})) || { echo "health checks: $service has no target groups"; return 1; }
+  for tg in "${tgs[@]}"; do
+    raw=$(aws elbv2 describe-target-groups --target-group-arns "$tg" \
+      --query 'TargetGroups[0].[HealthCheckIntervalSeconds, HealthyThresholdCount]' --output text) || return 1
+    read -r interval healthy <<<"$raw"
+    if [[ "$interval $healthy" == "$HEALTH_CHECK_INTERVAL $HEALTHY_THRESHOLD" ]]; then
+      echo "health checks (${tg#*:targetgroup/}): every ${interval}s, $healthy to pass (already set)"
+    else
+      aws elbv2 modify-target-group --target-group-arn "$tg" \
+        --health-check-interval-seconds "$HEALTH_CHECK_INTERVAL" --healthy-threshold-count "$HEALTHY_THRESHOLD" \
+        --query 'TargetGroups[0].TargetGroupName' --output text >/dev/null || return 1
+      echo "health checks (${tg#*:targetgroup/}): every ${interval}s, $healthy to pass -> every ${HEALTH_CHECK_INTERVAL}s, $HEALTHY_THRESHOLD to pass"
+    fi
+  done
+}
+
+# Best effort: a deploy with Express Mode's defaults is only slower.
+rollout_settings() { # cluster service
+  set_rollout_settings "$@" ||
+    echo "warning: couldn't set the rollout waits and health checks ($(aws --version 2>&1 | cut -d' ' -f1)); this rollout uses Express Mode's defaults"
+}
+
+step install
+require_tools aws node curl
+check_terraform
+echo "app $APP, env $ENV, action $ACTION, release $(basename "$SLIPWAY_HOME"), AWS profile ${AWS_PROFILE:-default}"
+
+# ---------------------------------------------------------------------------
+# shared: ECR repository and log group
+# ---------------------------------------------------------------------------
+
+if [[ "$ENV" == shared ]]; then
+  appyaml render-shared --app "$APP" --out-dir "$WORK_DIR" --modules-dir "$SLIPWAY_HOME/modules" \
+    --state-bucket "$STATE_BUCKET" --region "$AWS_REGION"
+  if [[ "$ACTION" == apply ]]; then
+    step terraform-apply
+    tf_init
+    tf_apply
+  else
+    step terraform-destroy
+    tf_init
+    tf_destroy
+    step release-cleanup
+    # Best effort: the app is gone either way, and old artifacts only cost storage.
+    aws s3 rm "s3://$RELEASES_BUCKET/releases/$APP/" --recursive --only-show-errors ||
+      echo "warning: could not delete s3://$RELEASES_BUCKET/releases/$APP/; remove it by hand"
+  fi
+  echo "shared stack for $APP: $ACTION done"
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# staging / prod: destroy
+# ---------------------------------------------------------------------------
+
+if [[ "$ACTION" == destroy ]]; then
+  step terraform-destroy
+  # Re-render with the inputs the state was last applied with (the "inputs"
+  # output), so lifting deletion protection doesn't also resize anything.
+  printf '{"size":"small","api_port":3000,"health_check_path":"/api/health","migrate_command":["node","dist/migrate.js"],"secret_names":[]}' >"$TMP/inputs.json"
+  render_env --inputs-json "$TMP/inputs.json"
+  tf_init
+  tf_out inputs >"$TMP/inputs.json"
+  if [[ ! -s "$TMP/inputs.json" ]]; then
+    echo "$APP has no $ENV environment in state; nothing to destroy"
+  else
+    render_env --inputs-json "$TMP/inputs.json"
+    current=(
+      -var "service_image=$(tf_out service_image)"
+      -var "migrate_image=$(tf_out migrate_image)"
+      -var "release=$(tf_out release)"
+      -var "deploy_id=$(tf_out deploy_id)"
+      -var "clerk_publishable_key=$(tf_out clerk_publishable_key)"
+    )
+    if [[ "$ENV" == prod ]]; then
+      echo "Lifting deletion protection; RDS keeps a final snapshot"
+      tf_apply "${current[@]}" -var destroying=true
+    fi
+    tf_destroy "${current[@]}" -var destroying=true
+  fi
+  step delete-secrets
+  delete_secret_parameters
+  echo "$APP $ENV destroyed"
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# staging / prod: apply (design 5.6)
+# ---------------------------------------------------------------------------
+
+require_env COMMIT_SHA IMAGE_DIGEST WEB_ARTIFACT DEPLOY_ID
+[[ "$IMAGE_DIGEST" == sha256:* ]] || die "IMAGE_DIGEST must look like sha256:..., not '$IMAGE_DIGEST'"
+SHORT="${COMMIT_SHA:0:7}"
+NEW_IMAGE="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/app-$APP@$IMAGE_DIGEST"
+
+step app-yaml
+aws s3 cp "s3://$RELEASES_BUCKET/releases/$APP/$COMMIT_SHA/app.yaml" "$TMP/app.yaml" --only-show-errors ||
+  die "release $SHORT has no app.yaml in s3://$RELEASES_BUCKET/releases/$APP/$COMMIT_SHA/"
+appyaml validate "$TMP/app.yaml" --app "$APP"
+mapfile -t declared < <(appyaml get "$TMP/app.yaml" secrets | sed '/^$/d')
+HEALTH_PATH=$(appyaml get "$TMP/app.yaml" api.health_check)
+
+step secrets-check
+# The environment's Clerk application keys, which the dev team stores in one
+# secret per Clerk application (docs/foundation.md): slipway/clerk/stage or
+# slipway/clerk/production, holding {"publishableKey","secretKey"}. Only the
+# publishable key is kept (it's public); the secret key is checked, never printed.
+case "$ENV" in staging) clerk_name=stage ;; prod) clerk_name=production ;; *) die "no Clerk application for env $ENV" ;; esac
+clerk_secret="slipway/clerk/$clerk_name"
+CLERK_PUBLISHABLE_KEY=$(aws secretsmanager get-secret-value --secret-id "$clerk_secret" --query SecretString --output text 2>/dev/null |
+  jq -r 'if (.publishableKey | type) == "string" and ((.secretKey // "") | startswith("sk_")) then .publishableKey else empty end' 2>/dev/null || true)
+[[ "$CLERK_PUBLISHABLE_KEY" == pk_* ]] ||
+  die "$clerk_secret is missing, or isn't JSON with publishableKey (pk_...) and secretKey (sk_...); the dev team must set it (docs/foundation.md)"
+if ((${#declared[@]})); then
+  existing=$(secret_parameters)
+  missing=()
+  for key in "${declared[@]}"; do
+    grep -qxF "/apps/$APP/$ENV/$key" <<<"$existing" || missing+=("$key")
+  done
+  if ((${#missing[@]})); then
+    list=$(printf ', %s' "${missing[@]}")
+    die "missing secrets for $ENV: ${list:2}. Set each one with /secret set <NAME> --env $ENV, then deploy again"
+  fi
+  echo "all ${#declared[@]} declared secrets are set for $ENV"
+else
+  echo "app.yaml declares no secrets"
+fi
+
+step terraform-phase1
+render_env --app-yaml "$TMP/app.yaml"
+tf_init
+CURRENT_IMAGE=$(tf_out service_image)
+CURRENT_RELEASE=$(tf_out release)
+CURRENT_DEPLOY_ID=$(tf_out deploy_id)
+echo "service currently runs: ${CURRENT_RELEASE:-nothing (first deploy)}; deploying $SHORT"
+tf_apply \
+  -var "service_image=$CURRENT_IMAGE" \
+  -var "release=$CURRENT_RELEASE" \
+  -var "deploy_id=$CURRENT_DEPLOY_ID" \
+  -var "clerk_publishable_key=$CLERK_PUBLISHABLE_KEY" \
+  -var "migrate_image=$NEW_IMAGE"
+
+step migrate
+CLUSTER=$(tf_req cluster_name)
+LOG_GROUP=$(tf_req log_group_name)
+MIGRATE_TASK_DEFINITION=$(tf_req migrate_task_definition_arn)
+SUBNET_IDS=$(tf_req subnet_ids)
+TASK_SECURITY_GROUP=$(tf_req task_security_group_id)
+read -r TASK_ARN FAILURE < <(aws ecs run-task \
+  --cluster "$CLUSTER" \
+  --task-definition "$MIGRATE_TASK_DEFINITION" \
+  --launch-type FARGATE \
+  --started-by "slipway-deploy-$DEPLOY_ID" \
+  --network-configuration "awsvpcConfiguration={subnets=[$SUBNET_IDS],securityGroups=[$TASK_SECURITY_GROUP],assignPublicIp=ENABLED}" \
+  --query '[tasks[0].taskArn, failures[0].reason]' --output text)
+[[ "$TASK_ARN" == arn:* ]] || die "could not start the migrate task: $FAILURE"
+echo "migrate task: $TASK_ARN"
+
+deadline=$((SECONDS + ${MIGRATE_TIMEOUT_SECONDS:-1800}))
+while :; do
+  read -r STATUS EXIT_CODE STOP_REASON < <(aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$TASK_ARN" \
+    --query 'tasks[0].[lastStatus, containers[0].exitCode, stoppedReason]' --output text)
+  [[ "$STATUS" != STOPPED ]] || break
+  if ((SECONDS > deadline)); then
+    aws ecs stop-task --cluster "$CLUSTER" --task "$TASK_ARN" --reason "deploy-env timeout" >/dev/null || true
+    die "the migration was still running after $((${MIGRATE_TIMEOUT_SECONDS:-1800} / 60)) minutes and was stopped; the service still runs ${CURRENT_RELEASE:-nothing}"
+  fi
+  sleep 10
+done
+
+echo "--- migrate logs ---"
+aws logs get-log-events --log-group-name "$LOG_GROUP" \
+  --log-stream-name "$ENV/migrate/migrate/${TASK_ARN##*/}" --start-from-head \
+  --query 'events[].message' --output text | tr '\t' '\n' || echo "(no logs)"
+echo "--- end of migrate logs ---"
+if [[ "$EXIT_CODE" != 0 ]]; then
+  [[ "$STOP_REASON" == None ]] && STOP_REASON=""
+  die "the migration failed (exit code $EXIT_CODE${STOP_REASON:+, $STOP_REASON}); the service still runs ${CURRENT_RELEASE:-nothing} and the deploy stopped here"
+fi
+
+SERVICE_NAME=$(tf_out service_name)
+if [[ -n "$SERVICE_NAME" ]]; then
+  step rollout-settings
+  rollout_settings "$CLUSTER" "$SERVICE_NAME"
+fi
+
+step terraform-phase2
+tf_apply \
+  -var "service_image=$NEW_IMAGE" \
+  -var "release=$SHORT" \
+  -var "deploy_id=$DEPLOY_ID" \
+  -var "clerk_publishable_key=$CLERK_PUBLISHABLE_KEY" \
+  -var "migrate_image=$NEW_IMAGE"
+APP_URL=$(tf_req app_url)
+SERVICE_URL=$(tf_out service_url)
+# Again after the rollout: a first deploy has just created the service, and
+# "already set" shows that Express Mode kept the settings through its update.
+echo "rollout settings after the rollout:"
+SERVICE_NAME=$(tf_req service_name)
+rollout_settings "$CLUSTER" "$SERVICE_NAME"
+
+step web-sync
+mkdir -p "$TMP/web"
+aws s3 cp "$WEB_ARTIFACT" "$TMP/web.tgz" --only-show-errors || die "could not download $WEB_ARTIFACT"
+tar -xzf "$TMP/web.tgz" -C "$TMP/web" --no-same-owner
+[[ -f "$TMP/web/index.html" ]] || die "$WEB_ARTIFACT has no index.html"
+# The bucket is public through CloudFront: upload plain files only, never what a link points at.
+[[ -z "$(find "$TMP/web" -type l -print -quit)" ]] || die "$WEB_ARTIFACT contains symbolic links"
+BUCKET=$(tf_req web_bucket)
+# Hashed assets are cached for good and kept across deploys, so a page loaded
+# before this deploy can still fetch its lazy chunks.
+if [[ -d "$TMP/web/assets" ]]; then
+  aws s3 sync "$TMP/web/assets" "s3://$BUCKET/assets" --no-follow-symlinks \
+    --cache-control "public,max-age=31536000,immutable" --only-show-errors
+fi
+# Everything else is revalidated on every request. cp, not sync: sync compares
+# sizes and times and would skip an older index.html on rollback.
+aws s3 cp "$TMP/web" "s3://$BUCKET" --recursive --no-follow-symlinks --exclude "assets/*" --exclude config.json \
+  --cache-control no-cache --only-show-errors
+WEB_CLERK_KEY=$(tf_req clerk_publishable_key)
+node -e 'process.stdout.write(JSON.stringify({ clerkPublishableKey: process.argv[1], env: process.argv[2], release: process.argv[3] }) + "\n")' \
+  "$WEB_CLERK_KEY" "$ENV" "$SHORT" >"$TMP/config.json"
+aws s3 cp "$TMP/config.json" "s3://$BUCKET/config.json" \
+  --content-type application/json --cache-control no-store --only-show-errors
+DISTRIBUTION_ID=$(tf_req distribution_id)
+aws cloudfront create-invalidation --distribution-id "$DISTRIBUTION_ID" --paths '/*' \
+  --query 'Invalidation.Id' --output text
+
+step health-check
+health_release() {
+  node -e 'let b = ""; process.stdin.on("data", (d) => (b += d)).on("end", () => {
+    try { process.stdout.write(String(JSON.parse(b).release ?? "")); } catch {}
+  })'
+}
+body=""
+for _ in $(seq 1 "${HEALTH_ATTEMPTS:-30}"); do
+  if body=$(curl -fsS --max-time 10 "$APP_URL$HEALTH_PATH" 2>&1) && [[ "$(health_release <<<"$body")" == "$SHORT" ]]; then
+    echo "$APP_URL$HEALTH_PATH: $body"
+    export_var APP_URL "$APP_URL"
+    export_var SERVICE_URL "$SERVICE_URL"
+    echo "$APP $ENV is live at $APP_URL (release $SHORT)"
+    exit 0
+  fi
+  echo "waiting for $SHORT: ${body:0:200}"
+  sleep 10
+done
+die "$APP_URL$HEALTH_PATH did not report release $SHORT within $((${HEALTH_ATTEMPTS:-30} * 10)) seconds; last response: ${body:0:200}"
