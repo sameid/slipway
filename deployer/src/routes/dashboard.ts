@@ -8,12 +8,16 @@ import { apps, jobs, pullRequests, releases, users, webhookDeliveries, type AppR
 import { KEEP_DELIVERIES } from "../deliveries.js";
 import { catchUpApp } from "../events.js";
 import { ACTIVE, enqueue, getApp, getJob, getRelease, queueDeploy, supersedeQueued } from "../jobs.js";
-import { isAppEnv, shortSha } from "../names.js";
-import { secretStatuses } from "../secrets.js";
+import { ApiError } from "../errors.js";
+import { isAppEnv, shortSha, type AppEnv } from "../names.js";
+import { canSetSecrets, parseEnvFile, secretStatuses, setSecrets, type SetSecretsResult } from "../secrets.js";
 import { jobLog } from "./api.js";
 import { requireAdmin, requireUser } from "./auth.js";
 
 const param = (req: Request, name: string) => String(req.params[name] ?? "");
+
+/** "A", "A and B", "A, B and C". */
+const listing = (names: string[]) => (names.length > 1 ? `${names.slice(0, -1).join(", ")} and ${names.at(-1)}` : (names[0] ?? ""));
 
 function notFound(res: Response, what: string): void {
   res.status(404).render("message", { title: "Not found", message: `${what} doesn't exist.` });
@@ -117,6 +121,7 @@ export function dashboardRoutes(deps: Deps): express.Router {
       secretError,
       canPromote: !!staging && staging.status === "ready" && ["active", "failed"].includes(app.status),
       canRetryTeardown: app.status === "destroying" && activeJobs.length === 0,
+      canSetSecrets: canSetSecrets(app),
       shortSha,
     });
   });
@@ -191,6 +196,84 @@ export function dashboardRoutes(deps: Deps): express.Router {
     const job = queueDeploy(deps, app.name, env, release, req.user!.email);
     deps.log("rollback", { app: app.name, env, release: release.id, by: req.user!.email, job: job.id });
     flash(req, `Deploying ${shortSha(release.commitSha)} to ${env} (job #${job.id}).`);
+    res.redirect(`/apps/${app.name}`);
+  });
+
+  // --- Secrets: set several values for one environment, with one redeploy ------
+
+  async function renderSecrets(res: Response, app: AppRow, env: AppEnv, error: string | null, status = 200): Promise<void> {
+    const canSet = canSetSecrets(app);
+    let rows: Awaited<ReturnType<typeof secretStatuses>> = [];
+    let loadError: string | null = null;
+    if (canSet) {
+      try {
+        rows = await secretStatuses(deps, app);
+      } catch (err) {
+        loadError = `Couldn't read app.yaml from GitHub: ${(err as Error).message}`;
+      }
+    }
+    res.status(status).render("secrets", {
+      title: `${app.name} secrets`,
+      app,
+      env,
+      secrets: rows,
+      error: error ?? loadError,
+      canSet,
+      loadFailed: !!loadError,
+      deployed: !!(env === "staging" ? app.stagingReleaseId : app.prodReleaseId),
+    });
+  }
+
+  router.get("/apps/:name/secrets/:env", async (req, res) => {
+    const app = getApp(deps, param(req, "name"));
+    const env = param(req, "env");
+    if (!app || !isAppEnv(env)) return notFound(res, "That page");
+    await renderSecrets(res, app, env, null);
+  });
+
+  router.post("/apps/:name/secrets/:env", async (req, res) => {
+    const app = getApp(deps, param(req, "name"));
+    const env = param(req, "env");
+    if (!app || !isAppEnv(env)) return notFound(res, "That page");
+    // Values are never echoed back: on an error the form comes back empty.
+    const values = new Map<string, string>();
+    for (const [field, value] of Object.entries(req.body ?? {})) {
+      if (field.startsWith("value:") && typeof value === "string" && value.trim()) values.set(field.slice(6), value);
+    }
+    const pasted = parseEnvFile(typeof req.body?.env_file === "string" ? req.body.env_file : "");
+    if (pasted.badLines.length) {
+      const lines = pasted.badLines.length > 1 ? `Lines ${listing(pasted.badLines.map(String))} of the pasted text aren't` : `Line ${pasted.badLines[0]} of the pasted text isn't`;
+      return renderSecrets(res, app, env, `${lines} KEY=value. Nothing was saved.`, 400);
+    }
+    for (const [key, value] of pasted.values) {
+      if (!value.trim()) continue;
+      if (values.has(key) && values.get(key) !== value) {
+        return renderSecrets(res, app, env, `${key} has one value in its field and another in the pasted text. Nothing was saved.`, 400);
+      }
+      values.set(key, value);
+    }
+    let result: SetSecretsResult;
+    try {
+      result = await setSecrets(deps, app, env, values, req.user!.email);
+    } catch (err) {
+      if (!(err instanceof ApiError)) throw err;
+      return renderSecrets(res, app, env, err.message, err.status);
+    }
+    const { saved, failed, ignored, redeploy } = result;
+    const them = saved.length > 1 ? "them" : "it";
+    flash(
+      req,
+      [
+        `Saved ${listing(saved)} for ${env}.`,
+        redeploy
+          ? `Redeploying ${env} so the app picks ${them} up (job #${redeploy.id}).`
+          : `${env} hasn't been deployed yet, so its first deploy will use ${them}.`,
+        failed.length ? `Couldn't save ${listing(failed)}: try ${failed.length > 1 ? "them" : "it"} again.` : "",
+        ignored.length ? `Ignored ${listing(ignored)}: not declared in app.yaml on main.` : "",
+      ]
+        .filter(Boolean)
+        .join(" "),
+    );
     res.redirect(`/apps/${app.name}`);
   });
 

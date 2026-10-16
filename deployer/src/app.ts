@@ -107,6 +107,8 @@ export function createApp(deps: Deps, extraRoutes?: (app: express.Express) => vo
   app.use("/static", express.static(`${viewsDir}/static`, { maxAge: deps.config.production ? "1h" : 0 }));
   extraRoutes?.(app);
 
+  // The secrets page can carry many values of up to 4 KB each, or a pasted .env file.
+  app.use("/apps/:name/secrets", express.urlencoded({ extended: false, limit: "256kb" }));
   app.use(express.urlencoded({ extended: false, limit: "16kb" }));
   app.use(
     session({

@@ -10,7 +10,7 @@ import { ApiError } from "../errors.js";
 import { getApp, getJob } from "../jobs.js";
 import { isAppEnv, SECRET_KEY } from "../names.js";
 import { registerApp } from "../registration.js";
-import { createLink, linkState, secretStatuses } from "../secrets.js";
+import { canSetSecrets, createLink, linkState, secretStatuses } from "../secrets.js";
 import { appJson, jobJson, pullJson } from "../serialize.js";
 
 type Handler = (req: Request, res: Response) => Promise<unknown> | unknown;
@@ -138,7 +138,7 @@ export function apiRoutes(deps: Deps): express.Router {
       const key = param(req, "key");
       if (!isAppEnv(env)) throw new ApiError(400, "env must be staging or prod");
       if (!SECRET_KEY.test(key)) throw new ApiError(400, "Secret names look like STRIPE_KEY");
-      if (!["registering", "active", "failed"].includes(app.status)) throw new ApiError(409, `${app.name} is ${app.status}`);
+      if (!canSetSecrets(app)) throw new ApiError(409, `${app.name} is ${app.status}`);
       res.status(201).json(await createLink(deps, app, env, key, req.login!));
     }),
   );

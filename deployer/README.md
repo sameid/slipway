@@ -19,7 +19,7 @@ src/
   deliveries.ts       the webhook log: every delivery and what was done with it (dashboard: Webhooks)
   automerge.ts        merge decisions (design 5.7)
   registration.ts     POST /api/apps
-  secrets.ts          one-time links, Parameter Store writes, redeploys (design 5.8)
+  secrets.ts          one-time links, the dashboard's batch form, Parameter Store writes, redeploys (design 5.8)
   serialize.ts        plugin API JSON shapes
   github.ts           the GitHub App (@octokit/app), installed on the owner org or personal account
   runs.ts             the runner's client: start runs over its socket, poll them, read logs
@@ -171,7 +171,7 @@ The instance has one role, shared by the deployer and the runner; the foundation
   - its branch conflicts with main.
 
   In any of those cases the PR is marked `blocked` and gets one comment. A branch that's behind main is updated through GitHub, which triggers a fresh check.
-- **Secrets:** setting a value redeploys the environment's current release. If a deploy of that environment is already queued, that deploy picks the value up instead. Every deploy passes `DEPLOY_ID`, so tasks restart even when the image hasn't changed.
+- **Secrets:** setting a value redeploys the environment's current release. If a deploy of that environment is already queued, that deploy picks the value up instead. An app's secrets page on the dashboard (`/apps/<app>/secrets/<env>`) sets any number of values, typed or pasted as a `.env` file, with a single redeploy. Every deploy passes `DEPLOY_ID`, so tasks restart even when the image hasn't changed.
 - **Webhook log:** every delivery, including rejected ones, is recorded with what the deployer did, or why it did nothing (no app for the repo, not main, the app is destroyed, a bad signature...). The dashboard's Webhooks page and each app's page show it; the newest 2,000 are kept. Repo names are matched case-insensitively, like GitHub's, which may spell the owner `Acme` in payloads where the app's repo says `acme`.
 - **Catch-up on startup**, and on demand with **Sync with GitHub** on an app's page:
   - queues a build for an unbuilt head of main;

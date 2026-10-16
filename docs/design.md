@@ -593,6 +593,7 @@ The plugin sends the colleague's `gh auth token`. The deployer checks it with Gi
 | `/login`, `/password` | Sign in, change password |
 | `/` | Jobs in progress, the last webhook received, and every app: staging release, prod release, last deploy result, links |
 | `/apps/:name` | Pull requests and their checks, job history with log links, recent webhooks, release history, secret names and status, Promote, Rollback, Sync with GitHub, confirm teardown |
+| `/apps/:name/secrets/:env` | Set any number of an environment's secret values at once, typed into fields or pasted as a `.env` file, with one redeploy (see 5.8) |
 | `/deliveries` | Webhooks: every GitHub delivery and what the deployer did with it, filterable by app and outcome |
 | `/secrets/set/:token` | One-time form to set a secret value (no dashboard account needed; the token is the authorization) |
 | `/users` (admins) | Create accounts, reset passwords, disable accounts |
@@ -670,6 +671,10 @@ Anything typed into Claude Code is sent to the model and kept in the session tra
 
 Containers read secrets only at startup, which is why every change triggers a redeploy. Rotating a key is the same flow: set it again.
 
+**Setting several values from the dashboard**
+
+Someone with a dashboard account can set an environment's values together on `/apps/<name>/secrets/<env>`, instead of running `/secret set` once per key. The page has a password field for every name declared in `app.yaml` on `main`, plus an optional box for pasting a `.env` file; empty fields keep their current value. Names in the pasted text that `app.yaml` doesn't declare are ignored and listed back. Nothing is written if a pasted line can't be read, a value is too long, or a field and the pasted text disagree. The deployer then writes each value, records the dashboard user as the one who set it, and queues one redeploy of that environment for the whole batch. Values are never shown back, not even when the form has an error.
+
 `/secret list` shows each declared name per environment, whether it's set, and who last set it. Nobody, including the dev team through the dashboard, can view a value after it's set.
 
 **Delivery to the app**
@@ -683,7 +688,7 @@ Containers read secrets only at startup, which is why every change triggers a re
 | Deployer instance role | `ssm:PutParameter` and `ssm:DescribeParameters` on `/apps/*`, `kms:Encrypt` on the platform key. No `GetParameter`, no `kms:Decrypt`: it can write values but never read them. |
 | App task execution role | `ssm:GetParameters` on `/apps/<name>/<env>/*` only, `kms:Decrypt` on the platform key |
 | `deploy-env` role | `ssm:DescribeParameters` on `/apps/*`, to check secrets exist; delete on teardown |
-| Colleagues | None. They set values only through one-time links. |
+| Colleagues | None. They set values only through one-time links, or on the dashboard's secrets page if they have an account. |
 
 **Local development**
 

@@ -169,7 +169,7 @@
 </form>
 <% } %>
 
-<%- include("partials/section", { heading: "Secrets", sectionNote: "Values are set with <code>/secret set</code> in Claude Code and can't be viewed." }) %>
+<%- include("partials/section", { heading: "Secrets", sectionNote: "Set values here or with <code>/secret set</code> in Claude Code. Nobody can view them afterwards." }) %>
 <% if (secretError) { %>
 <div class="alert alert--danger" role="alert"><div class="alert__content"><p class="alert__description text-danger"><%= secretError %></p></div></div>
 <% } else if (!secrets.length) { %>
@@ -192,6 +192,12 @@
     </table>
   </div>
 </div>
+<% if (canSetSecrets) { %>
+<div class="mt-3 flex flex-wrap gap-2">
+  <a class="button button--secondary button--sm" href="/apps/<%= app.name %>/secrets/staging">Set staging values</a>
+  <a class="button button--secondary button--sm" href="/apps/<%= app.name %>/secrets/prod">Set prod values</a>
+</div>
+<% } %>
 <% } %>
 
 <%- include("partials/section", { heading: "Teardown" }) %>

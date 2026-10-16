@@ -1,7 +1,7 @@
 ---
 description: List this app's secrets, or get a one-time browser link to set one for staging or prod
 argument-hint: "list | set <KEY> --env staging|prod"
-allowed-tools: Bash(slipway secret *), Bash(${CLAUDE_PLUGIN_ROOT}/bin/slipway secret *)
+allowed-tools: Bash(slipway secret *), Bash(${CLAUDE_PLUGIN_ROOT}/bin/slipway secret *), Bash(slipway whoami), Bash(${CLAUDE_PLUGIN_ROOT}/bin/slipway whoami)
 ---
 
 Manage the app's third-party keys (Stripe, OpenAI, ...). The `slipway` CLI is on PATH while this plugin is enabled (if not, use `"${CLAUDE_PLUGIN_ROOT}/bin/slipway"`). Exit codes: 0 done, 1 error, 2 usage, 3 failed, 10 still waiting (run the same command again).
@@ -18,5 +18,7 @@ Arguments: $ARGUMENTS
 2. If `--env` is missing, ask which environment: staging or prod. They're always set separately.
 3. Run `slipway secret set <KEY> --env <env> --open`. It creates a link that works once and expires in 10 minutes, tries to open it in the browser, and prints it. Tell the user to paste the value into that page, not here.
 4. The same command then waits for the value and the redeploy of that environment. Exit 10 means still waiting: run `slipway secret wait <link-id>` with the id it printed. Exit 0 means the value is saved and live. Exit 3: the link expired (offer a new one) or the redeploy failed (show the step and error).
+
+**Several keys at once:** `/secret set` takes one key per link and redeploys each time. If the colleague has several to set and a deployer dashboard account, point them to the app's secrets page instead: `<deployer URL>/apps/<app>/secrets/<env>`, where `slipway whoami` prints the deployer URL. It has a field for every declared name, also takes a pasted `.env` file, and saving redeploys that environment once. Without a dashboard account, they set each key with `/secret set`.
 
 Nobody can read a value back after it's set, including whoever runs the deployer. To rotate a key, set it again.

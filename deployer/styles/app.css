@@ -24,6 +24,7 @@
 @import "@heroui/styles/components/link.css" layer(components);
 @import "@heroui/styles/components/table.css" layer(components);
 @import "@heroui/styles/components/textfield.css" layer(components);
+@import "@heroui/styles/components/textarea.css" layer(components);
 
 @source "../views";
 
@@ -49,11 +50,12 @@
     background-image: url("/static/chevron.svg");
   }
 
-  /* In HeroUI's dark theme a field is the same colour as a card, so a field on a
-     card (the sign-in form, for one) disappears. Use the default fill there instead;
-     these selectors outrank HeroUI's own resting, hover and focus backgrounds. */
-  [data-theme="dark"] .card .input,
-  [data-theme="dark"] .card .input:hover {
+  /* In HeroUI's dark theme a field is the same colour as a card or a table row, so
+     a field on one (the sign-in form, the secrets table) disappears. Use the default
+     fill there instead; these selectors outrank HeroUI's own resting, hover and focus
+     backgrounds. */
+  [data-theme="dark"] :is(.card, .table-root) :is(.input, .textarea),
+  [data-theme="dark"] :is(.card, .table-root) :is(.input, .textarea):hover {
     background-color: var(--default);
   }
 

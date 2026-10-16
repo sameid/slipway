@@ -277,7 +277,7 @@ type SecretStatus = { set: boolean; lastSetBy: string | null; lastSetAt: string 
 | `POST /api/apps/:name/secrets/:env/:key/link` | | `201 { "url": "<deployer>/secrets/set/<token>", "linkId": "<opaque>", "expiresAt": "..." }`. `400` if the key isn't declared in `app.yaml` on `main`. |
 | `GET /api/apps/:name/secret-links/:linkId` | | `{ "status": "pending" \| "used" \| "expired", "usedAt": string \| null, "redeploy": Job \| null }` |
 
-Browser and GitHub routes: `POST /webhooks/github`; `GET`/`POST /secrets/set/:token`; dashboard pages from design 5.5.
+Browser and GitHub routes: `POST /webhooks/github`; `GET`/`POST /secrets/set/:token`; dashboard pages from design 5.5, including `GET`/`POST /apps/:name/secrets/:env` for setting several values at once.
 
 ## Deployer behaviour the plugin relies on
 
@@ -287,7 +287,7 @@ Browser and GitHub routes: `POST /webhooks/github`; `GET`/`POST /secrets/set/:to
 - **Auto-merge refusals**: a passing check is not merged, and the PR gets status `blocked` with a `note` and a PR comment, when the PR is a draft, touches `.github/**` or `CODEOWNERS`, changes a platform-owned `app.yaml` field, the app has `auto_merge: false`, or updating the branch from `main` conflicts.
 - **Ordering**: builds and deploys of an app wait until its shared stack has deployed.
 - **Login rate limits**: 5 failures in 15 minutes locks an email; 20 locks an IP (colleagues in one office share an address).
-- **Secret set** writes `/apps/<app>/<env>/<KEY>` (SecureString with the `aws/ssm` key, overwrite), records it in `secrets`, marks the link used, and queues a deploy of that env's current release (if the env has one) with `requestedBy` = the GitHub login that created the link.
+- **Secret set** writes `/apps/<app>/<env>/<KEY>` (SecureString with the `aws/ssm` key, overwrite), records it in `secrets`, marks the link used, and queues a deploy of that env's current release (if the env has one) with `requestedBy` = the GitHub login that created the link. Values set on the dashboard's secrets page are written the same way, with one deploy for the whole batch and `requestedBy` = the dashboard user's email.
 
 ## Deployer host
 
