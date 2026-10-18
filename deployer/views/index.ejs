@@ -74,7 +74,7 @@
           <% for (const [release, url] of [[staging, app.stagingUrl], [prod, app.prodUrl]]) { %>
           <td class="table__cell">
             <% if (release) { %><%- include("partials/sha", { sha: release.commitSha, shaRepo: app.repo }) %><% } else { %><span class="text-muted">none</span><% } %>
-            <% if (url) { %><a class="link ms-2 text-xs" href="<%= url %>">open ↗</a><% } %>
+            <% if (url) { %><a class="link ms-2 text-xs" href="<%= url %>" target="_blank" rel="noopener">open ↗</a><% } %>
           </td>
           <% } %>
           <td class="table__cell">

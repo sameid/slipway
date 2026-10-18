@@ -33,7 +33,7 @@
 <div class="card card--default mt-4">
   <div class="card__content gap-3 text-sm">
     <p class="flex flex-wrap items-center gap-2 text-base font-semibold">
-      <% if (d.status === "active") { %><a class="link" href="https://<%= d.hostname %>">https://<%= d.hostname %></a><% } else { %><span><%= d.hostname %></span><% } %>
+      <% if (d.status === "active") { %><a class="link" href="https://<%= d.hostname %>" target="_blank" rel="noopener">https://<%= d.hostname %></a><% } else { %><span><%= d.hostname %></span><% } %>
       <%- include("partials/domain-chip", { domain: d }) %>
     </p>
     <p class="text-muted">

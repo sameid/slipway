@@ -1,7 +1,7 @@
 <%# An env card's custom domain line. Params: env, domain (or undefined), deployed. %>
 <% if (domain) { %>
 <p class="flex flex-wrap items-center gap-2">
-  <% if (domain.status === "active") { %><a class="link" href="https://<%= domain.hostname %>">https://<%= domain.hostname %></a><% } else { %><span><%= domain.hostname %></span><% } %>
+  <% if (domain.status === "active") { %><a class="link" href="https://<%= domain.hostname %>" target="_blank" rel="noopener">https://<%= domain.hostname %></a><% } else { %><span><%= domain.hostname %></span><% } %>
   <%- include("domain-chip", { domain }) %>
   <a class="link text-xs" href="/apps/<%= app.name %>/domains/<%= env %>">Manage</a>
 </p>
