@@ -1,6 +1,7 @@
 // Dashboard pages (design 5.5 "Dashboard pages"). Every signed-in user can
 // promote, roll back and confirm teardown; admins also manage accounts.
-import { and, desc, eq, inArray } from "drizzle-orm";
+import { and, count, desc, eq, inArray, notInArray, type SQL } from "drizzle-orm";
+import type { SQLiteColumn, SQLiteTable } from "drizzle-orm/sqlite-core";
 import express, { type Request, type Response } from "express";
 import { hashPassword, temporaryPassword } from "../auth/passwords.js";
 import { iso, type Deps } from "../deps.js";
@@ -25,6 +26,33 @@ function notFound(res: Response, what: string): void {
 
 function flash(req: Request, message: string): void {
   req.session.flash = message;
+}
+
+// The app page's tabs, ?tab=<key>; Jobs is the default.
+const TABS = ["jobs", "releases", "code", "settings"] as const;
+type Tab = (typeof TABS)[number];
+const appTab = (value: unknown): Tab => TABS.find((t) => t === value) ?? "jobs";
+const appUrl = (name: string, tab: Tab = "jobs") => (tab === "jobs" ? `/apps/${name}` : `/apps/${name}?tab=${tab}`);
+
+// Long lists show the newest PAGE rows; each "Load more" shows PAGE more, up to MAX_ROWS.
+const PAGE = 25;
+const MAX_ROWS = 1000;
+const ROLLBACK_CHOICES = 100;
+
+/** How many rows a list shows: ?<list>=n from its "Load more" link, or PAGE. */
+function listLimit(value: unknown): number {
+  const n = Number(value);
+  return Number.isInteger(n) && n > PAGE ? Math.min(n, MAX_ROWS) : PAGE;
+}
+
+/** A list's rows, its length in the database, and the "Load more" link while there's more to show. */
+function page<T>(rows: T[], total: number, limit: number, next: (last: T) => string) {
+  const last = rows.at(-1);
+  return { rows, total, more: last && total > rows.length && limit < MAX_ROWS ? next(last) : null };
+}
+
+function rowCount(deps: Deps, table: SQLiteTable, where: SQL | undefined): number {
+  return deps.db.select({ n: count() }).from(table).where(where).get()?.n ?? 0;
 }
 
 /** Queue prod, then staging, then shared teardown (design 6, "Teardown"). */
@@ -74,56 +102,88 @@ export function dashboardRoutes(deps: Deps): express.Router {
   router.get("/apps/:name", async (req, res) => {
     const app = getApp(deps, param(req, "name"));
     if (!app) return notFound(res, "That app");
-    const releaseRows = deps.db
-      .select()
-      .from(releases)
-      .where(eq(releases.app, app.name))
-      .orderBy(desc(releases.id))
-      .limit(30)
-      .all();
-    const jobRows = deps.db.select().from(jobs).where(eq(jobs.app, app.name)).orderBy(desc(jobs.id)).limit(50).all();
-    let secretRows: Awaited<ReturnType<typeof secretStatuses>> = [];
-    let secretError: string | null = null;
-    if (app.status !== "destroyed") {
-      try {
-        secretRows = await secretStatuses(deps, app);
-      } catch (err) {
-        secretError = `Couldn't read app.yaml from GitHub: ${(err as Error).message}`;
-      }
-    }
-    const pulls = deps.db
-      .select()
-      .from(pullRequests)
-      .where(eq(pullRequests.app, app.name))
-      .orderBy(desc(pullRequests.updatedAt))
-      .limit(20)
-      .all()
-      .map((pull) => ({ pull, check: getJob(deps, pull.checkJobId) }));
-    const deliveries = deps.db
-      .select()
-      .from(webhookDeliveries)
-      .where(eq(webhookDeliveries.app, app.name))
-      .orderBy(desc(webhookDeliveries.id))
-      .limit(15)
-      .all();
+    const tab = appTab(req.query.tab);
+    const ofApp = (column: SQLiteColumn) => eq(column, app.name);
+    const activeJobs = rowCount(deps, jobs, and(ofApp(jobs.app), inArray(jobs.status, ACTIVE)));
+    const openPulls = rowCount(deps, pullRequests, and(ofApp(pullRequests.app), notInArray(pullRequests.status, ["merged", "closed"])));
     const staging = getRelease(deps, app.stagingReleaseId);
-    const activeJobs = jobRows.filter((j) => ACTIVE.includes(j.status));
-    res.render("app", {
+    const view: Record<string, unknown> = {
       title: app.name,
       app,
+      tab,
+      tabs: [
+        { key: "jobs", label: "Jobs", count: activeJobs, countTitle: `${activeJobs} queued or running` },
+        { key: "releases", label: "Releases" },
+        { key: "code", label: "Code", count: openPulls, countTitle: `${openPulls} open pull request${openPulls === 1 ? "" : "s"}` },
+        { key: "settings", label: "Settings", alert: app.status === "destroy_requested" ? "A teardown is waiting to be confirmed" : null },
+      ],
       staging,
       prod: getRelease(deps, app.prodReleaseId),
-      releases: releaseRows,
-      jobs: jobRows,
-      pulls,
-      deliveries,
-      secrets: secretRows,
-      secretError,
       canPromote: !!staging && staging.status === "ready" && ["active", "failed"].includes(app.status),
-      canRetryTeardown: app.status === "destroying" && activeJobs.length === 0,
-      canSetSecrets: canSetSecrets(app),
+      appUrl,
       shortSha,
-    });
+    };
+    // A "Load more" link: this tab with a longer list, scrolled to the list's last row so far.
+    const url = (list: string, limit: number, anchor: string) =>
+      `/apps/${app.name}?${new URLSearchParams({ tab, [list]: String(limit + PAGE) })}#${anchor}`;
+
+    if (tab === "jobs") {
+      const limit = listLimit(req.query.jobs);
+      const rows = deps.db.select().from(jobs).where(ofApp(jobs.app)).orderBy(desc(jobs.id)).limit(limit).all();
+      view.jobs = page(rows, rowCount(deps, jobs, ofApp(jobs.app)), limit, (last) => url("jobs", limit, `job-${last.id}`));
+    } else if (tab === "releases") {
+      const limit = listLimit(req.query.releases);
+      const rows = deps.db.select().from(releases).where(ofApp(releases.app)).orderBy(desc(releases.id)).limit(limit).all();
+      view.releases = page(rows, rowCount(deps, releases, ofApp(releases.app)), limit, (last) => url("releases", limit, `release-${last.id}`));
+      // The rollback form offers releases that built, beyond the ones listed; a row's
+      // "Deploy…" link picks its release in the form.
+      const ready = deps.db
+        .select()
+        .from(releases)
+        .where(and(ofApp(releases.app), eq(releases.status, "ready")))
+        .orderBy(desc(releases.id))
+        .limit(ROLLBACK_CHOICES)
+        .all();
+      const picked = getRelease(deps, Number(req.query.release) || null);
+      if (picked && picked.app === app.name && picked.status === "ready" && !ready.some((r) => r.id === picked.id)) ready.push(picked);
+      view.ready = ready;
+      view.picked = picked?.id ?? null;
+      view.canRollback = ["active", "failed"].includes(app.status);
+    } else if (tab === "code") {
+      const limit = listLimit(req.query.prs);
+      const rows = deps.db
+        .select()
+        .from(pullRequests)
+        .where(ofApp(pullRequests.app))
+        .orderBy(desc(pullRequests.updatedAt))
+        .limit(limit)
+        .all()
+        .map((pull) => ({ pull, check: getJob(deps, pull.checkJobId) }));
+      view.pulls = page(rows, rowCount(deps, pullRequests, ofApp(pullRequests.app)), limit, (last) => url("prs", limit, `pr-${last.pull.number}`));
+      view.deliveries = deps.db
+        .select()
+        .from(webhookDeliveries)
+        .where(ofApp(webhookDeliveries.app))
+        .orderBy(desc(webhookDeliveries.id))
+        .limit(15)
+        .all();
+    } else {
+      // Only this tab reads app.yaml from GitHub.
+      let secretRows: Awaited<ReturnType<typeof secretStatuses>> = [];
+      let secretError: string | null = null;
+      if (app.status !== "destroyed") {
+        try {
+          secretRows = await secretStatuses(deps, app);
+        } catch (err) {
+          secretError = `Couldn't read app.yaml from GitHub: ${(err as Error).message}`;
+        }
+      }
+      view.secrets = secretRows;
+      view.secretError = secretError;
+      view.canSetSecrets = canSetSecrets(app);
+      view.canRetryTeardown = app.status === "destroying" && activeJobs === 0;
+    }
+    res.render("app", view);
   });
 
   router.get("/apps/:name/jobs/:id", async (req, res) => {
@@ -168,7 +228,7 @@ export function dashboardRoutes(deps: Deps): express.Router {
     if (!app) return notFound(res, "That app");
     if (!["active", "failed", "destroy_requested"].includes(app.status)) {
       flash(req, `${app.name} is ${app.status.replace(/_/g, " ")}; there's nothing to sync.`);
-      return res.redirect(`/apps/${app.name}`);
+      return res.redirect(appUrl(app.name, appTab(req.body.tab)));
     }
     try {
       const done = await catchUpApp(deps, app);
@@ -177,7 +237,7 @@ export function dashboardRoutes(deps: Deps): express.Router {
     } catch (err) {
       flash(req, `Couldn't sync with GitHub: ${(err as Error).message}`);
     }
-    res.redirect(`/apps/${app.name}`);
+    res.redirect(appUrl(app.name, appTab(req.body.tab)));
   });
 
   router.post("/apps/:name/rollback", (req, res) => {
@@ -187,11 +247,11 @@ export function dashboardRoutes(deps: Deps): express.Router {
     const release = getRelease(deps, Number(req.body.release_id));
     if (!isAppEnv(env) || !release || release.app !== app.name || release.status !== "ready") {
       flash(req, "Pick an environment and a release that built successfully.");
-      return res.redirect(`/apps/${app.name}`);
+      return res.redirect(appUrl(app.name, "releases"));
     }
     if (!["active", "failed"].includes(app.status)) {
       flash(req, `${app.name} is ${app.status}; it can't be deployed.`);
-      return res.redirect(`/apps/${app.name}`);
+      return res.redirect(appUrl(app.name, "releases"));
     }
     const job = queueDeploy(deps, app.name, env, release, req.user!.email);
     deps.log("rollback", { app: app.name, env, release: release.id, by: req.user!.email, job: job.id });
@@ -274,7 +334,7 @@ export function dashboardRoutes(deps: Deps): express.Router {
         .filter(Boolean)
         .join(" "),
     );
-    res.redirect(`/apps/${app.name}`);
+    res.redirect(appUrl(app.name, "settings"));
   });
 
   router.post("/apps/:name/destroy", (req, res) => {
@@ -282,18 +342,18 @@ export function dashboardRoutes(deps: Deps): express.Router {
     if (!app) return notFound(res, "That app");
     if (app.status !== "destroy_requested") {
       flash(req, "Teardown starts with /destroy-app from the app's owner.");
-      return res.redirect(`/apps/${app.name}`);
+      return res.redirect(appUrl(app.name, "settings"));
     }
     if (String(req.body.confirm ?? "").trim() !== app.name) {
       flash(req, `Type ${app.name} exactly to confirm the teardown.`);
-      return res.redirect(`/apps/${app.name}`);
+      return res.redirect(appUrl(app.name, "settings"));
     }
     deps.db.update(apps).set({ status: "destroying", error: null }).where(eq(apps.name, app.name)).run();
     supersedeQueued(deps, app.name, "The app is being torn down");
     queueTeardown(deps, app, req.user!.email);
     deps.log("teardown confirmed", { app: app.name, by: req.user!.email });
     flash(req, `Tearing down ${app.name}: prod, then staging, then shared.`);
-    res.redirect(`/apps/${app.name}`);
+    res.redirect(appUrl(app.name, "settings"));
   });
 
   router.post("/apps/:name/destroy/cancel", (req, res) => {
@@ -308,7 +368,7 @@ export function dashboardRoutes(deps: Deps): express.Router {
       deps.log("teardown request cancelled", { app: app.name, by: req.user!.email });
       flash(req, "Teardown request cancelled.");
     }
-    res.redirect(`/apps/${app.name}`);
+    res.redirect(appUrl(app.name, "settings"));
   });
 
   router.post("/apps/:name/destroy/retry", (req, res) => {
@@ -323,7 +383,7 @@ export function dashboardRoutes(deps: Deps): express.Router {
       queueTeardown(deps, app, req.user!.email);
       flash(req, "Teardown queued again.");
     }
-    res.redirect(`/apps/${app.name}`);
+    res.redirect(appUrl(app.name, "settings"));
   });
 
   // --- Users (admins) ---------------------------------------------------------

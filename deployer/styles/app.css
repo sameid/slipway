@@ -23,6 +23,7 @@
 @import "@heroui/styles/components/label.css" layer(components);
 @import "@heroui/styles/components/link.css" layer(components);
 @import "@heroui/styles/components/table.css" layer(components);
+@import "@heroui/styles/components/tabs.css" layer(components);
 @import "@heroui/styles/components/textfield.css" layer(components);
 @import "@heroui/styles/components/textarea.css" layer(components);
 

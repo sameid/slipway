@@ -13,6 +13,7 @@
   <% if (["active", "failed", "destroy_requested"].includes(app.status)) { %>
   <form method="post" action="/apps/<%= app.name %>/sync" title="Queue checks for open PRs and builds for main that missed webhooks would have queued">
     <input type="hidden" name="_csrf" value="<%= csrfToken %>">
+    <input type="hidden" name="tab" value="<%= tab %>">
     <button class="button button--secondary button--sm">Sync with GitHub</button>
   </form>
   <% } %>
@@ -53,8 +54,105 @@
   </div>
 </div>
 
+<nav class="tabs tabs--secondary mt-8" data-orientation="horizontal" aria-label="Sections">
+  <div class="tabs__list-container overflow-x-auto">
+    <div class="tabs__list" data-orientation="horizontal">
+      <% for (const t of tabs) { const on = t.key === tab; %>
+      <a class="tabs__tab w-auto gap-2" href="<%= appUrl(app.name, t.key) %>" <%- on ? 'data-selected="true" aria-current="page"' : "" %>>
+        <%= t.label %>
+        <% if (t.count) { %><span class="chip chip--soft chip--sm <%= t.key === "jobs" ? "chip--accent" : "chip--default" %>" title="<%= t.countTitle %>"><span class="chip__label tabular-nums"><%= t.count %></span></span><% } %>
+        <% if (t.alert) { %><span class="size-2 rounded-full bg-danger" title="<%= t.alert %>" aria-hidden="true"></span><span class="sr-only"><%= t.alert %></span><% } %>
+        <% if (on) { %><span class="tabs__indicator"></span><% } %>
+      </a>
+      <% } %>
+    </div>
+  </div>
+</nav>
+
+<div class="mt-6">
+<% if (tab === "jobs") { %>
+<% if (!jobs.rows.length) { %>
+  <div class="card card--default"><p class="empty-state">None yet.</p></div>
+<% } else { %>
+<div class="table-root table-root--primary">
+  <div class="table__scroll-container">
+    <table class="table__content">
+      <thead class="table__header"><tr>
+        <th class="table__column">#</th><th class="table__column">Job</th><th class="table__column">Status</th><th class="table__column">Duration</th><th class="table__column">Requested by</th><th class="table__column">Queued</th><th class="table__column">Result</th>
+      </tr></thead>
+      <tbody class="table__body">
+      <% for (const j of jobs.rows) { %>
+        <tr class="table__row scroll-mt-20" id="job-<%= j.id %>">
+          <td class="table__cell"><a class="link" href="/apps/<%= app.name %>/jobs/<%= j.id %>"><%= j.id %></a></td>
+          <td class="table__cell whitespace-nowrap"><%= jobName(j) %><% if (j.prNumber) { %> · <a class="link" href="https://github.com/<%= app.repo %>/pull/<%= j.prNumber %>">PR #<%= j.prNumber %></a><% } %> <%- include("partials/sha", { sha: j.commitSha, shaRepo: null }) %></td>
+          <td class="table__cell"><%- include("partials/badge", { status: j.status }) %></td>
+          <td class="table__cell whitespace-nowrap"><% if (j.status === "queued") { %><span class="text-muted">waiting</span><% } else { %><%- include("partials/job-time", { job: j }) %><% } %></td>
+          <td class="table__cell"><%= j.requestedBy %></td>
+          <td class="table__cell whitespace-nowrap text-muted" title="<%= fmt(j.createdAt) %>"><%= ago(j.createdAt) %></td>
+          <td class="table__cell max-w-md"><% if (j.error) { %><span class="<%= j.status === "failed" ? "text-danger" : "text-muted" %>"><%= j.failedStep ? j.failedStep + ": " : "" %><%= j.error %></span><% } %></td>
+        </tr>
+      <% } %>
+      </tbody>
+    </table>
+  </div>
+</div>
+<% } %>
+<%- include("partials/load-more", { list: jobs }) %>
+
+<% } else if (tab === "releases") { %>
+<% if (ready.length && canRollback) { %>
+<%- include("partials/section", { heading: "Roll back or redeploy", sectionNote: "Deploy any release that built. Rollbacks deploy older code but never reverse database migrations." }) %>
+<form method="post" action="/apps/<%= app.name %>/rollback" id="rollback" class="card card--default scroll-mt-20 flex-row flex-wrap items-end gap-4">
+  <input type="hidden" name="_csrf" value="<%= csrfToken %>">
+  <div class="textfield min-w-64 flex-1">
+    <label class="label" for="release_id">Release</label>
+    <select class="input" id="release_id" name="release_id">
+      <% for (const r of ready) { %>
+        <option value="<%= r.id %>" <%= r.id === picked ? "selected" : "" %>><%= shortSha(r.commitSha) %> · #<%= r.id %> · <%= fmt(r.createdAt) %><%= staging && staging.id === r.id ? " · on staging" : "" %><%= prod && prod.id === r.id ? " · on prod" : "" %></option>
+      <% } %>
+    </select>
+  </div>
+  <div class="textfield">
+    <label class="label" for="env">Environment</label>
+    <select class="input" id="env" name="env"><option value="staging">staging</option><option value="prod">prod</option></select>
+  </div>
+  <button class="button button--secondary">Deploy</button>
+</form>
+<% } %>
+
+<%- include("partials/section", { heading: "Releases" }) %>
+<% if (!releases.rows.length) { %>
+  <div class="card card--default"><p class="empty-state">None yet.</p></div>
+<% } else { %>
+<div class="table-root table-root--primary">
+  <div class="table__scroll-container">
+    <table class="table__content">
+      <thead class="table__header"><tr>
+        <th class="table__column">#</th><th class="table__column">Commit</th><th class="table__column">Status</th><th class="table__column">Built</th><th class="table__column">Image</th><% if (canRollback) { %><th class="table__column"><span class="sr-only">Deploy</span></th><% } %>
+      </tr></thead>
+      <tbody class="table__body">
+      <% for (const r of releases.rows) { %>
+        <tr class="table__row scroll-mt-20" id="release-<%= r.id %>">
+          <td class="table__cell"><%= r.id %></td>
+          <td class="table__cell whitespace-nowrap"><%- include("partials/sha", { sha: r.commitSha, shaRepo: app.repo }) %>
+            <% if (staging && staging.id === r.id) { %><span class="chip chip--soft chip--accent chip--sm ms-1"><span class="chip__label">staging</span></span><% } %>
+            <% if (prod && prod.id === r.id) { %><span class="chip chip--soft chip--success chip--sm ms-1"><span class="chip__label">prod</span></span><% } %></td>
+          <td class="table__cell"><%- include("partials/badge", { status: r.status }) %></td>
+          <td class="table__cell whitespace-nowrap text-muted" title="<%= fmt(r.createdAt) %>"><%= ago(r.createdAt) %></td>
+          <td class="table__cell font-mono text-xs text-muted"><%= r.imageDigest ? r.imageDigest.slice(0, 19) : "" %></td>
+          <% if (canRollback) { %><td class="table__cell text-end"><% if (r.status === "ready") { %><a class="link whitespace-nowrap text-sm" href="<%= appUrl(app.name, "releases") %>&amp;release=<%= r.id %>#rollback">Deploy…</a><% } %></td><% } %>
+        </tr>
+      <% } %>
+      </tbody>
+    </table>
+  </div>
+</div>
+<% } %>
+<%- include("partials/load-more", { list: releases }) %>
+
+<% } else if (tab === "code") { %>
 <%- include("partials/section", { heading: "Pull requests", sectionNote: "Each PR head gets a check; a passing check merges the PR unless something needs a person." }) %>
-<% if (!pulls.length) { %>
+<% if (!pulls.rows.length) { %>
   <div class="card card--default"><p class="empty-state">No pull requests seen yet. If one is open on GitHub, look for its webhook below, or use Sync with GitHub.</p></div>
 <% } else { %>
 <div class="table-root table-root--primary">
@@ -64,8 +162,8 @@
         <th class="table__column">PR</th><th class="table__column">Head</th><th class="table__column">Status</th><th class="table__column">Check</th><th class="table__column">Note</th><th class="table__column">Updated</th>
       </tr></thead>
       <tbody class="table__body">
-      <% for (const { pull, check } of pulls) { %>
-        <tr class="table__row">
+      <% for (const { pull, check } of pulls.rows) { %>
+        <tr class="table__row scroll-mt-20" id="pr-<%= pull.number %>">
           <td class="table__cell"><a class="link" href="https://github.com/<%= app.repo %>/pull/<%= pull.number %>">#<%= pull.number %></a></td>
           <td class="table__cell"><%- include("partials/sha", { sha: pull.headSha, shaRepo: app.repo }) %></td>
           <td class="table__cell"><%- include("partials/badge", { status: pull.status }) %></td>
@@ -84,34 +182,7 @@
   </div>
 </div>
 <% } %>
-
-<%- include("partials/section", { heading: "Jobs" }) %>
-<% if (!jobs.length) { %>
-  <div class="card card--default"><p class="empty-state">None yet.</p></div>
-<% } else { %>
-<div class="table-root table-root--primary">
-  <div class="table__scroll-container">
-    <table class="table__content">
-      <thead class="table__header"><tr>
-        <th class="table__column">#</th><th class="table__column">Job</th><th class="table__column">Status</th><th class="table__column">Duration</th><th class="table__column">Requested by</th><th class="table__column">Queued</th><th class="table__column">Result</th>
-      </tr></thead>
-      <tbody class="table__body">
-      <% for (const j of jobs) { %>
-        <tr class="table__row">
-          <td class="table__cell"><a class="link" href="/apps/<%= app.name %>/jobs/<%= j.id %>"><%= j.id %></a></td>
-          <td class="table__cell whitespace-nowrap"><%= jobName(j) %><% if (j.prNumber) { %> · <a class="link" href="https://github.com/<%= app.repo %>/pull/<%= j.prNumber %>">PR #<%= j.prNumber %></a><% } %> <%- include("partials/sha", { sha: j.commitSha, shaRepo: null }) %></td>
-          <td class="table__cell"><%- include("partials/badge", { status: j.status }) %></td>
-          <td class="table__cell whitespace-nowrap"><% if (j.status === "queued") { %><span class="text-muted">waiting</span><% } else { %><%- include("partials/job-time", { job: j }) %><% } %></td>
-          <td class="table__cell"><%= j.requestedBy %></td>
-          <td class="table__cell whitespace-nowrap text-muted" title="<%= fmt(j.createdAt) %>"><%= ago(j.createdAt) %></td>
-          <td class="table__cell max-w-md"><% if (j.error) { %><span class="<%= j.status === "failed" ? "text-danger" : "text-muted" %>"><%= j.failedStep ? j.failedStep + ": " : "" %><%= j.error %></span><% } %></td>
-        </tr>
-      <% } %>
-      </tbody>
-    </table>
-  </div>
-</div>
-<% } %>
+<%- include("partials/load-more", { list: pulls }) %>
 
 <%- include("partials/section", { heading: "Recent webhooks", sectionNote: "What GitHub sent about this app's repo, and what the deployer did.", sectionLink: { href: `/deliveries?app=${encodeURIComponent(app.name)}`, text: "All webhooks →" } }) %>
 <% if (!deliveries.length) { %>
@@ -120,55 +191,7 @@
 <%- include("partials/deliveries-table", { rows: deliveries, showRepo: false }) %>
 <% } %>
 
-<%- include("partials/section", { heading: "Releases" }) %>
-<% if (!releases.length) { %>
-  <div class="card card--default"><p class="empty-state">None yet.</p></div>
 <% } else { %>
-<div class="table-root table-root--primary">
-  <div class="table__scroll-container">
-    <table class="table__content">
-      <thead class="table__header"><tr>
-        <th class="table__column">#</th><th class="table__column">Commit</th><th class="table__column">Status</th><th class="table__column">Built</th><th class="table__column">Image</th>
-      </tr></thead>
-      <tbody class="table__body">
-      <% for (const r of releases) { %>
-        <tr class="table__row">
-          <td class="table__cell"><%= r.id %></td>
-          <td class="table__cell whitespace-nowrap"><%- include("partials/sha", { sha: r.commitSha, shaRepo: app.repo }) %>
-            <% if (staging && staging.id === r.id) { %><span class="chip chip--soft chip--accent chip--sm ms-1"><span class="chip__label">staging</span></span><% } %>
-            <% if (prod && prod.id === r.id) { %><span class="chip chip--soft chip--success chip--sm ms-1"><span class="chip__label">prod</span></span><% } %></td>
-          <td class="table__cell"><%- include("partials/badge", { status: r.status }) %></td>
-          <td class="table__cell whitespace-nowrap text-muted" title="<%= fmt(r.createdAt) %>"><%= ago(r.createdAt) %></td>
-          <td class="table__cell font-mono text-xs text-muted"><%= r.imageDigest ? r.imageDigest.slice(0, 19) : "" %></td>
-        </tr>
-      <% } %>
-      </tbody>
-    </table>
-  </div>
-</div>
-<% } %>
-
-<% const ready = releases.filter((r) => r.status === "ready"); %>
-<% if (ready.length && ["active", "failed"].includes(app.status)) { %>
-<%- include("partials/section", { heading: "Roll back or redeploy", sectionNote: "Rollbacks deploy older code but never reverse database migrations." }) %>
-<form method="post" action="/apps/<%= app.name %>/rollback" class="card card--default flex-row flex-wrap items-end gap-4">
-  <input type="hidden" name="_csrf" value="<%= csrfToken %>">
-  <div class="textfield min-w-64 flex-1">
-    <label class="label" for="release_id">Release</label>
-    <select class="input" id="release_id" name="release_id">
-      <% for (const r of ready) { %>
-        <option value="<%= r.id %>"><%= shortSha(r.commitSha) %> · #<%= r.id %> · <%= fmt(r.createdAt) %><%= staging && staging.id === r.id ? " · on staging" : "" %><%= prod && prod.id === r.id ? " · on prod" : "" %></option>
-      <% } %>
-    </select>
-  </div>
-  <div class="textfield">
-    <label class="label" for="env">Environment</label>
-    <select class="input" id="env" name="env"><option value="staging">staging</option><option value="prod">prod</option></select>
-  </div>
-  <button class="button button--secondary">Deploy</button>
-</form>
-<% } %>
-
 <%- include("partials/section", { heading: "Secrets", sectionNote: "Set values here or with <code>/secret set</code> in Claude Code. Nobody can view them afterwards." }) %>
 <% if (secretError) { %>
 <div class="alert alert--danger" role="alert"><div class="alert__content"><p class="alert__description text-danger"><%= secretError %></p></div></div>
@@ -228,6 +251,8 @@
   <p class="text-sm text-muted">Torn down. The repo is archived.</p>
 <% } else { %>
   <p class="text-sm text-muted">The app's owner starts a teardown with <code>/destroy-app</code>; it's confirmed here.</p>
+<% } %>
+</div>
 <% } %>
 </div>
 <%- include("partials/foot") %>

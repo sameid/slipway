@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { ago, duration } from "../src/app.js";
+import { jobs, pullRequests, releases } from "../src/db/schema.js";
 import { receiveGithubEvent } from "../src/deliveries.js";
 import { addUser, Browser, jobsOf, liveApp, serve, setup, type TestEnv } from "./helpers.js";
 
@@ -41,7 +42,7 @@ describe("dashboard", () => {
     expect(one.text).toContain("d-1");
     expect(one.text).not.toContain("d-2");
 
-    const app = await b.request("/apps/loan-tracker");
+    const app = await b.request("/apps/loan-tracker?tab=code");
     expect(app.text).toContain("Recent webhooks");
     expect(app.text).toMatch(/>#3<\/a>/); // the PR, from the pull_requests table
     expect(app.text).toContain("d-1");
@@ -90,6 +91,88 @@ describe("dashboard", () => {
     expect(donePage).not.toContain('http-equiv="refresh"');
     expect(donePage).toContain("Took</dt>");
     expect(donePage).not.toContain("data-elapsed");
+  });
+});
+
+describe("the app page", () => {
+  it("splits into tabs, each with its own sections", async () => {
+    const t = setup();
+    await liveApp(t);
+    const b = await signedIn(t);
+    const tab = async (query: string) => (await b.request(`/apps/loan-tracker${query}`)).text;
+
+    const jobsTab = await tab("");
+    expect(jobsTab).toMatch(/href="\/apps\/loan-tracker" data-selected="true" aria-current="page">\s*Jobs/);
+    expect(jobsTab).toContain('id="job-');
+    expect(jobsTab).not.toContain("Recent webhooks");
+    expect(jobsTab).not.toContain("Teardown");
+    expect(await tab("?tab=nonsense")).toContain('href="/apps/loan-tracker" data-selected="true"');
+
+    const releasesTab = await tab("?tab=releases");
+    expect(releasesTab).toContain("Roll back or redeploy");
+    expect(releasesTab).toContain('id="release-');
+    const code = await tab("?tab=code");
+    expect(code).toContain("Pull requests");
+    expect(code).toContain("Recent webhooks");
+    const settings = await tab("?tab=settings");
+    expect(settings).toContain("Secrets");
+    expect(settings).toContain("Teardown");
+    expect(settings).not.toContain('id="job-');
+  });
+
+  it("shows 25 rows of a long list, and 25 more each time Load more is clicked", async () => {
+    const t = setup();
+    await liveApp(t);
+    const at = new Date(t.clock.now).toISOString();
+    const before = t.deps.db.select().from(jobs).all().length;
+    for (let i = 0; i < 40; i++) {
+      t.deps.db.insert(jobs).values({ app: "loan-tracker", env: "build", kind: "build", status: "succeeded", requestedBy: "push", createdAt: at }).run();
+      t.deps.db.insert(releases).values({ app: "loan-tracker", commitSha: String(i).padStart(40, "c"), status: "ready", createdAt: at }).run();
+      t.deps.db.insert(pullRequests).values({ app: "loan-tracker", number: 100 + i, headSha: "d".repeat(40), status: "merged", updatedAt: at }).run();
+    }
+    const b = await signedIn(t);
+    const rows = (html: string, prefix: string) => [...html.matchAll(new RegExp(`id="${prefix}-(\\d+)"`, "g"))].map((m) => Number(m[1]));
+
+    const first = (await b.request("/apps/loan-tracker")).text;
+    const shown = rows(first, "job");
+    expect(shown).toHaveLength(25);
+    expect(first).toContain(`Showing 25 of ${before + 40}`);
+    expect(first).toContain(`href="/apps/loan-tracker?tab=jobs&amp;jobs=50#job-${shown.at(-1)}">Load more</a>`);
+    const second = (await b.request("/apps/loan-tracker?tab=jobs&jobs=50")).text;
+    expect(rows(second, "job")).toHaveLength(Math.min(50, before + 40));
+    expect((await b.request("/apps/loan-tracker?tab=jobs&jobs=5000")).text).not.toContain("Load more");
+
+    const code = (await b.request("/apps/loan-tracker?tab=code")).text;
+    expect(rows(code, "pr")).toHaveLength(25);
+    expect(code).toContain("Showing 25 of 40");
+    expect(code).toMatch(/href="\/apps\/loan-tracker\?tab=code&amp;prs=50#pr-\d+">Load more/);
+
+    // The rollback form offers every release that built, not only the 25 listed,
+    // and a release's Deploy… link picks it in the form.
+    const all = t.deps.db.select().from(releases).all();
+    const oldest = all[0]!;
+    const releasesTab = (await b.request("/apps/loan-tracker?tab=releases")).text;
+    expect(rows(releasesTab, "release")).toHaveLength(25);
+    expect(releasesTab.match(/<option value="\d+" /g)).toHaveLength(all.filter((r) => r.status === "ready").length);
+    expect(releasesTab).toContain(`href="/apps/loan-tracker?tab=releases&amp;release=${all.at(-1)!.id}#rollback">Deploy…</a>`);
+    const picked = (await b.request(`/apps/loan-tracker?tab=releases&release=${oldest.id}`)).text;
+    expect(picked).toContain(`<option value="${oldest.id}" selected>`);
+  });
+
+  it("comes back to the tab an action was taken on", async () => {
+    const t = setup();
+    await liveApp(t);
+    const b = await signedIn(t);
+    const _csrf = await b.csrf("/apps/loan-tracker");
+    const location = async (path: string, form: Record<string, string>) =>
+      (await b.request(path, { form: { _csrf, ...form } })).res.headers.get("location");
+
+    expect(await location("/apps/loan-tracker/sync", { tab: "code" })).toBe("/apps/loan-tracker?tab=code");
+    expect(await location("/apps/loan-tracker/sync", {})).toBe("/apps/loan-tracker");
+    expect(await location("/apps/loan-tracker/rollback", { env: "staging", release_id: "999" })).toBe("/apps/loan-tracker?tab=releases");
+    const release = t.deps.db.select().from(releases).all()[0]!;
+    expect(await location("/apps/loan-tracker/rollback", { env: "staging", release_id: String(release.id) })).toBe("/apps/loan-tracker");
+    expect(await location("/apps/loan-tracker/destroy/cancel", {})).toBe("/apps/loan-tracker?tab=settings");
   });
 });
 

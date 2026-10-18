@@ -190,7 +190,7 @@ describe("the dashboard's secrets page", () => {
 
   it("sets several values from fields and a pasted .env, then redeploys once", async () => {
     const { t, b, put, submit } = await page();
-    expect((await b.request("/apps/loan-tracker")).text).toContain('href="/apps/loan-tracker/secrets/staging"');
+    expect((await b.request("/apps/loan-tracker?tab=settings")).text).toContain('href="/apps/loan-tracker/secrets/staging"');
     const form = await b.request("/apps/loan-tracker/secrets/staging");
     for (const key of DECLARED) expect(form.text).toContain(`name="value:${key}"`);
     expect(form.text).toContain('autocomplete="new-password"');
@@ -202,7 +202,7 @@ describe("the dashboard's secrets page", () => {
       env_file: 'export STRIPE_KEY="sk_live_123"\n# not this one\nOPENAI_KEY=\nDATABASE_URL=postgres://x\n',
     });
     expect(res.res.status).toBe(302);
-    expect(res.res.headers.get("location")).toBe("/apps/loan-tracker");
+    expect(res.res.headers.get("location")).toBe("/apps/loan-tracker?tab=settings");
     expect(put).toEqual({
       "/apps/loan-tracker/staging/EXAMPLE_API_KEY": "example-value",
       "/apps/loan-tracker/staging/STRIPE_KEY": "sk_live_123",

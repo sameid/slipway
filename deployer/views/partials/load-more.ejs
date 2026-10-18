@@ -1,0 +1,9 @@
+<%# Under a list that shows the newest rows (list is a page() from the route): how many it shows, and a link to show more. -%>
+<% if (list.more) { %>
+<div class="mt-3 flex flex-wrap items-center gap-3">
+  <a class="button button--secondary button--sm" href="<%= list.more %>">Load more</a>
+  <span class="text-xs text-muted">Showing <%= list.rows.length %> of <%= list.total.toLocaleString("en") %></span>
+</div>
+<% } else if (list.total > list.rows.length) { %>
+<p class="mt-3 text-xs text-muted">Showing <%= list.rows.length %> of <%= list.total.toLocaleString("en") %>.</p>
+<% } %>

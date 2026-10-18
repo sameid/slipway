@@ -592,7 +592,7 @@ The plugin sends the colleague's `gh auth token`. The deployer checks it with Gi
 |---|---|
 | `/login`, `/password` | Sign in, change password |
 | `/` | Jobs in progress, the last webhook received, and every app: staging release, prod release, last deploy result, links |
-| `/apps/:name` | Pull requests and their checks, job history with log links, recent webhooks, release history, secret names and status, Promote, Rollback, Sync with GitHub, confirm teardown |
+| `/apps/:name` | Staging and prod with Promote, and Sync with GitHub, above four tabs (`?tab=`): **Jobs** (job history with log links; the default), **Releases** (Rollback, release history), **Code** (pull requests and their checks, recent webhooks) and **Settings** (secret names and status, confirm teardown). Jobs, releases and pull requests show 25 at a time, with Load more |
 | `/apps/:name/secrets/:env` | Set any number of an environment's secret values at once, typed into fields or pasted as a `.env` file, with one redeploy (see 5.8) |
 | `/deliveries` | Webhooks: every GitHub delivery and what the deployer did with it, filterable by app and outcome |
 | `/secrets/set/:token` | One-time form to set a secret value (no dashboard account needed; the token is the authorization) |
