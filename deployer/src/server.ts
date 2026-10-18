@@ -40,7 +40,7 @@ if (config.fake) {
       autoFinishMs: config.fakeBuildSeconds * 1000,
       siteUrl: (app, env) => `${publicUrl}/fake/sites/${app}/${env}`,
     }),
-    platform: new FakePlatform(),
+    platform: new FakePlatform({ autoIssueMs: config.fakeBuildSeconds * 1000 }),
     publicUrl,
     now: () => new Date(),
     log: consoleLog,

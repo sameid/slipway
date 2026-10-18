@@ -17,6 +17,7 @@ src/
   jobs.ts             queueing helpers (build + deploy, checks, de-duplication)
   events.ts           GitHub push / pull_request handling, catch-up on startup (and "Sync with GitHub")
   deliveries.ts       the webhook log: every delivery and what was done with it (dashboard: Webhooks)
+  domains.ts          custom domains: ACM certificates, attaching through deploys, removal (design 5.10)
   automerge.ts        merge decisions (design 5.7)
   registration.ts     POST /api/apps
   secrets.ts          one-time links, the dashboard's batch form, Parameter Store writes, redeploys (design 5.8)
@@ -173,6 +174,7 @@ The instance has one role, shared by the deployer and the runner; the foundation
   In any of those cases the PR is marked `blocked` and gets one comment. A branch that's behind main is updated through GitHub, which triggers a fresh check.
 - **Secrets:** setting a value redeploys the environment's current release. If a deploy of that environment is already queued, that deploy picks the value up instead. An app's secrets page on the dashboard (`/apps/<app>/secrets/<env>`) sets any number of values, typed or pasted as a `.env` file, with a single redeploy. Every deploy passes `DEPLOY_ID`, so tasks restart even when the image hasn't changed.
 - **Webhook log:** every delivery, including rejected ones, is recorded with what the deployer did, or why it did nothing (no app for the repo, not main, the app is destroyed, a bad signature...). The dashboard's Webhooks page and each app's page show it; the newest 2,000 are kept. Repo names are matched case-insensitively, like GitHub's, which may spell the owner `Acme` in payloads where the app's repo says `acme`.
+- **Custom domains:** on `/apps/<app>/domains/<env>`, anyone with a dashboard account can add a hostname they own. The deployer requests an ACM certificate for it in `us-east-1` and shows the two DNS records to create; the worker checks the certificate about once a minute, and once it's issued redeploys the environment (reusing a queued deploy) with `CUSTOM_DOMAIN` and `CERTIFICATE_ARN`, which `deploy-env` attaches to the CloudFront distribution. Every later deploy of that environment keeps it. Removing it redeploys without it, then deletes the certificate. `stagingUrl` and `prodUrl` stay the CloudFront URLs. In fake mode, certificates issue on their own after `FAKE_BUILD_SECONDS`.
 - **Catch-up on startup**, and on demand with **Sync with GitHub** on an app's page:
   - queues a build for an unbuilt head of main;
   - queues checks for open PR heads that have none;

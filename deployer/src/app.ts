@@ -52,8 +52,8 @@ export function duration(seconds: number): string {
 export function tone(status: string): "success" | "danger" | "warning" | "accent" | "default" {
   if (["succeeded", "active", "ready", "merged", "handled"].includes(status)) return "success";
   if (["failed", "check_failed", "rejected"].includes(status)) return "danger";
-  if (["blocked", "destroy_requested", "destroying"].includes(status)) return "warning";
-  if (["running", "checking", "building", "registering"].includes(status)) return "accent";
+  if (["blocked", "destroy_requested", "destroying", "removing"].includes(status)) return "warning";
+  if (["running", "checking", "building", "registering", "requesting", "validating", "attaching"].includes(status)) return "accent";
   return "default"; // queued, superseded, ignored, closed, destroyed
 }
 

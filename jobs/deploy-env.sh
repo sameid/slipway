@@ -3,7 +3,9 @@
 # deploy-env (design 5.6): apply or destroy one of an app's stacks.
 #
 # Inputs (env): APP, ENV (shared | staging | prod), ACTION (apply | destroy),
-#   and for staging/prod apply: COMMIT_SHA, IMAGE_DIGEST, WEB_ARTIFACT, DEPLOY_ID.
+#   and for staging/prod apply: COMMIT_SHA, IMAGE_DIGEST, WEB_ARTIFACT, DEPLOY_ID,
+#   plus CUSTOM_DOMAIN and CERTIFICATE_ARN (both or neither) when the env has a
+#   custom domain. Every apply passes them, so an apply without them detaches it.
 # From the runner: RELEASES_BUCKET, STATE_BUCKET, AWS_ACCOUNT_ID, SLIPWAY_HOME,
 #   SLIPWAY_WORK, SLIPWAY_EXPORTS, and AWS_PROFILE=slipway-deploy for credentials.
 #   It never runs app code: app.yaml is only parsed.
@@ -18,7 +20,8 @@
 #   terraform-phase2  service -> new image (first deploy: creates the service and CloudFront),
 #                     then the rollout settings again
 #   web-sync          frontend + config.json to S3, invalidate CloudFront
-#   health-check      <app url><health_check> reports the new release
+#   health-check      <app url><health_check> reports the new release; with a custom
+#                     domain, also asks CloudFront for it directly (logs only)
 
 # shellcheck source=lib.sh
 source "$(dirname "$0")/lib.sh"
@@ -212,6 +215,8 @@ if [[ "$ACTION" == destroy ]]; then
       -var "migrate_image=$(tf_out migrate_image)"
       -var "release=$(tf_out release)"
       -var "deploy_id=$(tf_out deploy_id)"
+      -var "custom_domain=$(tf_out custom_domain)"
+      -var "certificate_arn=$(tf_out certificate_arn)"
     )
     if [[ "$ENV" == prod ]]; then
       echo "Lifting deletion protection; RDS keeps a final snapshot"
@@ -233,6 +238,30 @@ require_env COMMIT_SHA IMAGE_DIGEST WEB_ARTIFACT DEPLOY_ID
 [[ "$IMAGE_DIGEST" == sha256:* ]] || die "IMAGE_DIGEST must look like sha256:..., not '$IMAGE_DIGEST'"
 SHORT="${COMMIT_SHA:0:7}"
 NEW_IMAGE="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/app-$APP@$IMAGE_DIGEST"
+
+CUSTOM_DOMAIN="${CUSTOM_DOMAIN:-}"
+CERTIFICATE_ARN="${CERTIFICATE_ARN:-}"
+if [[ -n "$CUSTOM_DOMAIN" || -n "$CERTIFICATE_ARN" ]]; then
+  [[ "$CUSTOM_DOMAIN" =~ ^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$ && "$CUSTOM_DOMAIN" == *.* ]] ||
+    die "CUSTOM_DOMAIN must be a lowercase hostname, not '$CUSTOM_DOMAIN'"
+  [[ "$CERTIFICATE_ARN" =~ ^arn:aws:acm:us-east-1:[0-9]{12}:certificate/[0-9a-f-]+$ ]] ||
+    die "CERTIFICATE_ARN must be an ACM certificate in us-east-1, not '$CERTIFICATE_ARN'"
+fi
+domain_vars=(-var "custom_domain=$CUSTOM_DOMAIN" -var "certificate_arn=$CERTIFICATE_ARN")
+
+# tf_apply, with a plain ERROR: line for the custom domain's own failures
+# (Terraform's error box isn't one, so the deployer would only see "failed").
+apply_env() {
+  local status=0
+  tf_apply "$@" 2>&1 | tee "$TMP/apply.log" || status=$?
+  if ((status != 0)) && [[ -n "$CUSTOM_DOMAIN" ]]; then
+    grep -q CNAMEAlreadyExists "$TMP/apply.log" &&
+      die "$CUSTOM_DOMAIN is attached to another CloudFront distribution, maybe in another AWS account; it has to be removed there first"
+    grep -q InvalidViewerCertificate "$TMP/apply.log" &&
+      die "CloudFront won't use the certificate for $CUSTOM_DOMAIN ($CERTIFICATE_ARN); it may have been deleted or not cover the name"
+  fi
+  return "$status"
+}
 
 step app-yaml
 aws s3 cp "s3://$RELEASES_BUCKET/releases/$APP/$COMMIT_SHA/app.yaml" "$TMP/app.yaml" --only-show-errors ||
@@ -264,11 +293,12 @@ CURRENT_IMAGE=$(tf_out service_image)
 CURRENT_RELEASE=$(tf_out release)
 CURRENT_DEPLOY_ID=$(tf_out deploy_id)
 echo "service currently runs: ${CURRENT_RELEASE:-nothing (first deploy)}; deploying $SHORT"
-tf_apply \
+apply_env \
   -var "service_image=$CURRENT_IMAGE" \
   -var "release=$CURRENT_RELEASE" \
   -var "deploy_id=$CURRENT_DEPLOY_ID" \
-  -var "migrate_image=$NEW_IMAGE"
+  -var "migrate_image=$NEW_IMAGE" \
+  "${domain_vars[@]}"
 
 step migrate
 CLUSTER=$(tf_req cluster_name)
@@ -315,11 +345,12 @@ if [[ -n "$SERVICE_NAME" ]]; then
 fi
 
 step terraform-phase2
-tf_apply \
+apply_env \
   -var "service_image=$NEW_IMAGE" \
   -var "release=$SHORT" \
   -var "deploy_id=$DEPLOY_ID" \
-  -var "migrate_image=$NEW_IMAGE"
+  -var "migrate_image=$NEW_IMAGE" \
+  "${domain_vars[@]}"
 APP_URL=$(tf_req app_url)
 SERVICE_URL=$(tf_out service_url)
 # Again after the rollout: a first deploy has just created the service, and
@@ -364,6 +395,16 @@ body=""
 for _ in $(seq 1 "${HEALTH_ATTEMPTS:-30}"); do
   if body=$(curl -fsS --max-time 10 "$APP_URL$HEALTH_PATH" 2>&1) && [[ "$(health_release <<<"$body")" == "$SHORT" ]]; then
     echo "$APP_URL$HEALTH_PATH: $body"
+    if [[ -n "$CUSTOM_DOMAIN" ]]; then
+      # Its DNS may not point here yet, so ask CloudFront directly: this shows
+      # the alias and certificate work. Only logged; DNS is the owner's part.
+      if domain_body=$(curl -fsS --max-time 10 --connect-to "$CUSTOM_DOMAIN:443:${APP_URL#https://}:443" \
+        "https://$CUSTOM_DOMAIN$HEALTH_PATH" 2>&1); then
+        echo "https://$CUSTOM_DOMAIN$HEALTH_PATH (asked CloudFront directly): ${domain_body:0:200}"
+      else
+        echo "warning: CloudFront didn't answer for https://$CUSTOM_DOMAIN yet: ${domain_body:0:200}"
+      fi
+    fi
     export_var APP_URL "$APP_URL"
     export_var SERVICE_URL "$SERVICE_URL"
     echo "$APP $ENV is live at $APP_URL (release $SHORT)"

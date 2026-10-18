@@ -5,7 +5,8 @@
 # var.region is dedicated to slipway, so the instance role may do anything
 # there. What it can reach outside the region is scoped tightly, because the
 # account may run other things elsewhere: IAM (only app-* roles, only with the
-# boundary), CloudFront (only distributions tagged as slipway apps) and
+# boundary), CloudFront (only distributions tagged as slipway apps), ACM in
+# us-east-1 (only certificates tagged as slipway's, for custom domains) and
 # nothing else. Untrusted build steps run as a user that can't reach the
 # instance metadata service, so they get none of this (docs/contracts.md).
 
@@ -325,6 +326,58 @@ data "aws_iam_policy_document" "deployer" {
       "cloudfront:UntagResource",
     ]
     resources = ["arn:${local.partition}:cloudfront::${local.account_id}:function/app-*"]
+  }
+
+  # --- ACM in us-east-1: custom domains' certificates ---
+  # CloudFront only uses certificates from us-east-1. The deployer requests them
+  # DNS-validated and tagged as slipway's, and can only read or delete those.
+
+  statement {
+    sid       = "RequestAppCertificates"
+    actions   = ["acm:RequestCertificate"]
+    resources = ["*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestedRegion"
+      values   = ["us-east-1"]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestTag/platform"
+      values   = ["slipway"]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "acm:ValidationMethod"
+      values   = ["DNS"]
+    }
+  }
+
+  # Tags given with the request are authorized as AddTagsToCertificate, which
+  # doesn't carry acm:ValidationMethod, so it's its own statement.
+  statement {
+    sid       = "TagNewAppCertificates"
+    actions   = ["acm:AddTagsToCertificate"]
+    resources = ["arn:${local.partition}:acm:us-east-1:${local.account_id}:certificate/*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestTag/platform"
+      values   = ["slipway"]
+    }
+  }
+
+  statement {
+    sid       = "ManageAppCertificates"
+    actions   = ["acm:DescribeCertificate", "acm:DeleteCertificate"]
+    resources = ["arn:${local.partition}:acm:us-east-1:${local.account_id}:certificate/*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:ResourceTag/platform"
+      values   = ["slipway"]
+    }
   }
 }
 

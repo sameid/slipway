@@ -95,6 +95,33 @@ variable "deploy_id" {
   default = ""
 }
 
+# A hostname someone added on the dashboard (e.g. loans.example.com) and the
+# ACM certificate in us-east-1 the deployer got for it. Both or neither. Every
+# deploy passes what the deployer has, so leaving them out detaches the domain.
+variable "custom_domain" {
+  type    = string
+  default = ""
+
+  validation {
+    condition     = var.custom_domain == "" || can(regex("^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$", var.custom_domain))
+    error_message = "custom_domain must be a lowercase hostname, like loans.example.com."
+  }
+}
+
+variable "certificate_arn" {
+  type    = string
+  default = ""
+
+  validation {
+    condition     = (var.certificate_arn == "") == (var.custom_domain == "")
+    error_message = "custom_domain and certificate_arn go together: set both or neither."
+  }
+  validation {
+    condition     = var.certificate_arn == "" || can(regex("^arn:aws:acm:us-east-1:[0-9]{12}:certificate/[0-9a-f-]+$", var.certificate_arn))
+    error_message = "certificate_arn must be an ACM certificate in us-east-1, which is where CloudFront looks."
+  }
+}
+
 # Set by deploy-env just before terraform destroy: lifts prod's deletion
 # protection and gives its final snapshot a unique name.
 variable "destroying" {

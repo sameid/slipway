@@ -1,0 +1,101 @@
+<%- include("partials/head") %>
+<nav class="breadcrumbs mb-3 text-sm text-muted"><a class="hover:underline" href="/">Apps</a> <span class="mx-1">/</span> <a class="hover:underline" href="/apps/<%= app.name %>"><%= app.name %></a> <span class="mx-1">/</span> Custom domain</nav>
+<h1 class="text-2xl font-semibold tracking-tight">Custom domain</h1>
+<p class="mt-1 max-w-2xl text-sm text-muted">Serve <%= app.name %> from a domain you own. Add the hostname, create two DNS records where your domain's DNS is managed, and the deployer attaches it once Amazon has issued its certificate. The <code>cloudfront.net</code> address keeps working too.</p>
+
+<nav class="mt-6 flex gap-1" aria-label="Environment">
+  <% for (const e of ["staging", "prod"]) { %>
+  <a class="nav-link" href="/apps/<%= app.name %>/domains/<%= e %>" <%- e === env ? 'aria-current="page"' : "" %>><%= e === "staging" ? "Staging" : "Prod" %></a>
+  <% } %>
+</nav>
+
+<% if (error) { %>
+<div class="alert alert--danger mt-4" role="alert"><div class="alert__content"><p class="alert__description text-danger"><%= error %></p></div></div>
+<% } %>
+
+<% if (!domain) { %>
+  <% if (!cdnHost) { %>
+    <div class="card card--default mt-4"><p class="empty-state"><%= env === "staging" ? "Staging" : "Prod" %> isn't deployed yet. Add a domain once it is.</p></div>
+  <% } else if (!canChange) { %>
+    <div class="card card--default mt-4"><p class="empty-state"><%= app.name %> is <%= app.status.replace(/_/g, " ") %>, so domains can't be added.</p></div>
+  <% } else { %>
+  <form method="post" action="/apps/<%= app.name %>/domains/<%= env %>" class="card card--default mt-4 flex-row flex-wrap items-end gap-4">
+    <input type="hidden" name="_csrf" value="<%= csrfToken %>">
+    <div class="textfield min-w-64 flex-1">
+      <label class="label" for="hostname">Hostname for <%= env %></label>
+      <input class="input" type="text" id="hostname" name="hostname" value="<%= typed %>" placeholder="<%= env === "staging" ? "staging." : "" %><%= app.name %>.example.com" autocomplete="off" autocapitalize="off" spellcheck="false" required>
+      <p class="description">A subdomain like <code>app.example.com</code> is easiest. One per environment.</p>
+    </div>
+    <button class="button button--primary">Add domain</button>
+  </form>
+  <% } %>
+<% } else { const d = domain; %>
+<div class="card card--default mt-4">
+  <div class="card__content gap-3 text-sm">
+    <p class="flex flex-wrap items-center gap-2 text-base font-semibold">
+      <% if (d.status === "active") { %><a class="link" href="https://<%= d.hostname %>">https://<%= d.hostname %></a><% } else { %><span><%= d.hostname %></span><% } %>
+      <%- include("partials/domain-chip", { domain: d }) %>
+    </p>
+    <p class="text-muted">
+      <% if (d.status === "requesting") { %>Requesting a certificate…
+      <% } else if (d.status === "validating") { %>Waiting for Amazon to see the validation record below. That usually takes a few minutes after you create it; this page reloads by itself.
+      <% } else if (d.status === "attaching") { %>The certificate is issued. <% if (job) { %><a class="link" href="/apps/<%= app.name %>/jobs/<%= job.id %>">Deploy job #<%= job.id %></a> attaches the domain.<% } else { %>It's attached by the next deploy of <%= env %>.<% } %>
+      <% } else if (d.status === "active") { %>Attached to <%= env %>. Once the routing record below is in place, <code><%= d.hostname %></code> serves <%= app.name %>.
+      <% } else if (d.status === "removing") { %><% if (job) { %><a class="link" href="/apps/<%= app.name %>/jobs/<%= job.id %>">Deploy job #<%= job.id %></a> detaches it<% } else { %>It's being detached<% } %>; then its certificate is deleted. You can delete the DNS records afterwards.
+      <% } else if (d.status === "failed") { %>Something went wrong; see below.<% } %>
+    </p>
+    <% if (d.error) { %>
+    <div class="alert alert--danger" role="alert"><div class="alert__content"><p class="alert__description text-danger"><%= d.error %></p></div></div>
+    <% } %>
+    <p class="text-xs text-muted">Added by <%= d.createdBy %> <span title="<%= fmt(d.createdAt) %>"><%= ago(d.createdAt) %></span></p>
+  </div>
+  <% if (canChange || d.status === "removing") { %>
+  <div class="card__footer gap-2">
+    <% if (d.status === "failed" || (d.status === "removing" && d.error)) { %>
+    <form method="post" action="/apps/<%= app.name %>/domains/<%= env %>/retry">
+      <input type="hidden" name="_csrf" value="<%= csrfToken %>">
+      <button class="button button--secondary button--sm"><%= d.status === "removing" ? "Retry removal" : "Retry" %></button>
+    </form>
+    <% } %>
+    <% if (d.status !== "removing" && d.status !== "requesting") { %>
+    <form method="post" action="/apps/<%= app.name %>/domains/<%= env %>/remove">
+      <input type="hidden" name="_csrf" value="<%= csrfToken %>">
+      <button class="button button--danger-soft button--sm">Remove</button>
+    </form>
+    <% } %>
+  </div>
+  <% } %>
+</div>
+
+<% if (d.status !== "removing") { %>
+<%- include("partials/section", { heading: "DNS records", sectionNote: "Create both where your domain's DNS is managed (your registrar, Cloudflare, Route 53…)." }) %>
+<div class="grid gap-3 lg:grid-cols-2">
+  <% for (const r of [
+    { title: "1. Prove you control the name", note: "Keep it afterwards: Amazon renews the certificate with it.", name: d.validationName, value: d.validationValue, pending: "Amazon is preparing this record…" },
+    { title: "2. Send visitors to " + app.name + " " + env, note: "This is what makes the domain serve the app.", name: d.hostname, value: cdnHost, pending: "Shown once " + env + " is deployed." },
+  ]) { %>
+  <div class="card card--default">
+    <div class="card__content gap-2 text-sm">
+      <p class="font-medium"><%= r.title %></p>
+      <p class="text-xs text-muted"><%= r.note %></p>
+      <% if (r.name && r.value) { %>
+      <dl class="grid gap-x-4 gap-y-1 sm:grid-cols-[4rem_1fr]">
+        <dt class="text-xs text-muted sm:pt-0.5">Type</dt><dd><code class="text-xs">CNAME</code></dd>
+        <dt class="text-xs text-muted sm:pt-0.5">Name</dt><dd><code class="select-all break-all text-xs"><%= r.name %></code></dd>
+        <dt class="text-xs text-muted sm:pt-0.5">Value</dt><dd><code class="select-all break-all text-xs"><%= r.value %></code></dd>
+      </dl>
+      <% } else { %><p class="text-muted"><%= r.pending %></p><% } %>
+    </div>
+  </div>
+  <% } %>
+</div>
+<ul class="mt-4 flex max-w-3xl list-disc flex-col gap-1 ps-5 text-sm text-muted">
+  <li>Some providers want only the first part of the name (<code><%= d.hostname.split(".")[0] %></code> rather than <code><%= d.hostname %></code>); they add the domain themselves.</li>
+  <li>A root domain like <code>example.com</code> can't have a CNAME. Use your provider's ALIAS, ANAME or CNAME flattening, or use a subdomain such as <code>www</code>.</li>
+  <li>On Cloudflare, set both records to <em>DNS only</em> (grey cloud), not proxied.</li>
+  <li>If the domain has CAA records, one must allow <code>amazon.com</code>.</li>
+  <li>The hostname appears in public certificate transparency logs.</li>
+</ul>
+<% } %>
+<% } %>
+<%- include("partials/foot") %>

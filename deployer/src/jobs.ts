@@ -144,6 +144,33 @@ export function queueDeploy(deps: Deps, app: string, env: AppEnv, release: Relea
   });
 }
 
+/**
+ * Apply a change that only takes effect on a deploy (a secret's new value, a
+ * custom domain) without changing what runs. A deploy that hasn't started yet
+ * will pick it up anyway; otherwise redeploy what's running (or about to be, if
+ * a deploy is in flight), so this never rolls an env back or supersedes a newer
+ * release. Null when the env has nothing deployed: its first deploy picks it up.
+ */
+export function queueRedeploy(deps: Deps, app: string, env: AppEnv, requestedBy: string): JobRow | null {
+  const pending = deps.db
+    .select()
+    .from(jobs)
+    .where(and(eq(jobs.app, app), eq(jobs.env, env), eq(jobs.kind, "deploy"), inArray(jobs.status, ["queued"])))
+    .orderBy(desc(jobs.id))
+    .get();
+  if (pending) return pending;
+  const running = deps.db
+    .select()
+    .from(jobs)
+    .where(and(eq(jobs.app, app), eq(jobs.env, env), eq(jobs.kind, "deploy"), eq(jobs.status, "running")))
+    .get();
+  const appRow = getApp(deps, app);
+  const releaseId = running?.releaseId ?? (env === "staging" ? appRow?.stagingReleaseId : appRow?.prodReleaseId);
+  const release = getRelease(deps, releaseId);
+  if (!release || release.status !== "ready") return null;
+  return queueDeploy(deps, app, env, release, requestedBy);
+}
+
 /** Queue a check for a PR's head commit, superseding queued checks for older heads. */
 export function queueCheck(deps: Deps, app: string, prNumber: number, headSha: string, requestedBy: string): JobRow {
   const queued = deps.db

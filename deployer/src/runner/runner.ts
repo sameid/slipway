@@ -33,7 +33,10 @@ import { RunStore, type RunRecord } from "./store.js";
 /** Inputs each kind accepts (contracts: build-release and deploy-env). Anything else is refused. */
 export const INPUTS: Record<RunKind, string[]> = {
   "build-release": ["APP", "COMMIT_SHA", "MODE", "PR_NUMBER"],
-  "deploy-env": ["APP", "ENV", "ACTION", "COMMIT_SHA", "IMAGE_DIGEST", "WEB_ARTIFACT", "DEPLOY_ID"],
+  "deploy-env": [
+    "APP", "ENV", "ACTION", "COMMIT_SHA", "IMAGE_DIGEST", "WEB_ARTIFACT", "DEPLOY_ID",
+    "CUSTOM_DOMAIN", "CERTIFICATE_ARN", // only when the env has a custom domain
+  ],
 };
 
 /** Exports each kind may return; other keys in exports.env are ignored. */

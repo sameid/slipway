@@ -16,6 +16,7 @@ import {
   type AppRow,
   type JobRow,
 } from "./db/schema.js";
+import { domainDeployFinished, domainDeployStarted, domainInputs, domainsTornDown, pollDomains } from "./domains.js";
 import { finishJob, getApp, getJob, getRelease } from "./jobs.js";
 import { CHECK_CONTEXT, deployContext, isAppEnv, shortSha, type AppEnv } from "./names.js";
 import { parseFailure, type RunInfo } from "./runs.js";
@@ -68,6 +69,12 @@ export class Worker {
     this.propagateFailures();
     this.supersede();
     await this.startReady();
+    // Custom domains' certificates (throttled per domain; see domains.ts).
+    try {
+      await pollDomains(this.deps);
+    } catch (err) {
+      this.deps.log("polling domains failed", { error: String(err) });
+    }
   }
 
   // --- 1. Poll running runs --------------------------------------------------
@@ -136,7 +143,12 @@ export class Worker {
         .run();
       return;
     }
-    if (job.kind === "deploy" && isAppEnv(job.env)) return this.onDeployed(app, job, job.env, exported.APP_URL);
+    if (job.kind === "deploy" && isAppEnv(job.env)) {
+      domainDeployFinished(this.deps, job, job.env);
+      return this.onDeployed(app, job, job.env, exported.APP_URL);
+    }
+    // The env's distribution is gone, so its custom domain's certificate can go too.
+    if (job.kind === "destroy") domainsTornDown(this.deps, app.name, job.env === "shared" ? "shared" : (job.env as AppEnv));
     if (job.kind === "destroy" && job.env === "shared") {
       // The last step of a teardown: prod and staging went first.
       this.deps.db.delete(secrets).where(eq(secrets.app, app.name)).run();
@@ -225,6 +237,7 @@ export class Worker {
     }
     if (job.kind === "deploy" && isAppEnv(job.env)) {
       const env = job.env;
+      domainDeployFinished(this.deps, job, env);
       try {
         await this.deps.platform.deployFailed({ app: app.name, env, summary: message, link: jobUrl(this.deps, job) });
       } catch (err) {
@@ -491,7 +504,12 @@ export class Worker {
         COMMIT_SHA: release.commitSha,
         IMAGE_DIGEST: release.imageDigest,
         WEB_ARTIFACT: release.webArtifact,
+        ...domainInputs(this.deps, app.name, job.env),
       });
+      const runId = await runs.start({ kind: "deploy-env", env });
+      // Only once it has started: a deploy that couldn't start doesn't count against the domain.
+      domainDeployStarted(this.deps, job, job.env);
+      return runId;
     }
     return runs.start({ kind: "deploy-env", env });
   }

@@ -38,6 +38,8 @@ These changes came out of building the platform and checking the region. Where t
 
     Running `/setup` again updates everything. Others who share a deployer run `/connect <url>`. Because an installed plugin only gets its own directory, the repo root is the plugin's root (marketplace source `.`), so `/setup` has `foundation/`, `deployer/`, `jobs/` and `modules/` next to it. The allowed users and the CODEOWNERS entry moved from user data to the SSM parameter `/slipway/deployer/github-access`, so changing them restarts the deployer instead of replacing the instance. [foundation.md](foundation.md) has the details.
 
+14. **Custom domains (bring your own).** Someone who owns a domain can attach it to an app's staging or prod on the dashboard; see 5.10. Buying domains is still out of scope.
+
 ## 1. Summary
 
 Colleagues run `/new-app` from our **slipway** Claude Code plugin and get back a GitHub repo and a working staging link a few minutes later. Every app gets its own staging and prod environments in our AWS account in `ca-west-1`: a Postgres database on RDS, an API on ECS Express Mode, and a frontend on S3 + CloudFront. Sign-in is handled by Clerk, already wired into the template.
@@ -60,7 +62,7 @@ Agents write code and open pull requests. They never deploy. All builds and depl
 
 **Non-goals (for now)**
 
-- Custom domains. Apps get CloudFront URLs (`https://dxxxx.cloudfront.net`).
+- Buying domains for apps. Apps get CloudFront URLs (`https://dxxxx.cloudfront.net`); someone who already owns a domain can attach it to an app's staging or prod (5.10).
 - SSO for the deployer dashboard. v1 uses local accounts; Google sign-in comes later.
 - Human review before merge. v1 merges on passing checks.
 - Per-PR preview environments.
@@ -348,7 +350,7 @@ Created once by the dev team from `foundation/`, all in `ca-west-1` except where
 - **KMS key** `alias/slipway-secrets`, used to encrypt app secrets in Parameter Store (see 5.8).
 - **The deployer**: EC2 instance, its IAM role, its CloudFront distribution and VPC origin, and the Litestream backup bucket.
 
-CloudFront is a global service; its distributions serve from edge locations worldwide, while every origin (S3, ECS, RDS, the deployer) stays in `ca-west-1`. When custom domains arrive, their CloudFront certificates must be created in ACM in `us-east-1`, which is a CloudFront requirement.
+CloudFront is a global service; its distributions serve from edge locations worldwide, while every origin (S3, ECS, RDS, the deployer) stays in `ca-west-1`. Custom domains' certificates are created in ACM in `us-east-1`, which is a CloudFront requirement (5.10).
 
 **Region availability check (rollout step 1)**
 
@@ -593,6 +595,7 @@ The plugin sends the colleague's `gh auth token`. The deployer checks it with Gi
 | `/login`, `/password` | Sign in, change password |
 | `/` | Jobs in progress, the last webhook received, and every app: staging release, prod release, last deploy result, links |
 | `/apps/:name` | Staging and prod with Promote, and Sync with GitHub, above four tabs (`?tab=`): **Jobs** (job history with log links; the default), **Releases** (Rollback, release history), **Code** (pull requests and their checks, recent webhooks) and **Settings** (secret names and status, confirm teardown). Jobs, releases and pull requests show 25 at a time, with Load more |
+| `/apps/:name/domains/:env` | Add a custom domain to an environment, see the DNS records to create and the domain's status, retry or remove it (5.10) |
 | `/apps/:name/secrets/:env` | Set any number of an environment's secret values at once, typed into fields or pasted as a `.env` file, with one redeploy (see 5.8) |
 | `/deliveries` | Webhooks: every GitHub delivery and what the deployer did with it, filterable by app and outcome |
 | `/secrets/set/:token` | One-time form to set a secret value (no dashboard account needed; the token is the authorization) |
@@ -730,6 +733,19 @@ Postgres can run schema changes inside a transaction, so a failed migration norm
 
 Two branches can each generate a migration with the same number, which Drizzle's migration journal treats as a conflict. `/ship` rebases onto `main` first, and if the journal conflicts, it discards the branch's generated migration and runs `drizzle-kit generate` again on top of `main`. `drizzle-kit check` in the PR check catches anything left over.
 
+### 5.10 Custom domains
+
+An app's staging and prod are always reachable on their CloudFront URLs. Someone who owns a domain can also serve an environment from it: on `/apps/<name>/domains/<env>` they add a hostname (one per environment), create two DNS records where the domain's DNS is managed, and the deployer does the rest.
+
+1. The deployer requests a certificate for the hostname from ACM in `us-east-1` (CloudFront only uses certificates from there), DNS-validated and tagged `platform=slipway`, `app`, `env`. The page shows the validation CNAME ACM asks for, and the routing CNAME: the hostname pointing at the environment's `dxxxx.cloudfront.net`.
+2. The worker asks ACM about the certificate about once a minute. Validating proves the person controls the name, which is also what CloudFront requires before it accepts the hostname as an alias.
+3. Once ACM issues it, the deployer redeploys what the environment runs (reusing a deploy that's already queued, so this never rolls anything back). Every deploy of that environment from then on passes the hostname and certificate to `deploy-env`, whose Terraform phase 1 adds the alias and the certificate to the distribution. The deployer's database decides: a deploy without them removes the alias.
+4. Removing a domain redeploys without it, then deletes the certificate once CloudFront has let go of it. Tearing down an environment deletes its domain's certificate too.
+
+The environment's URL everywhere else (PR comments, commit statuses, `/status`, the health check) stays the CloudFront one, which works whatever the domain's DNS does. The page notes that a root domain needs ALIAS/ANAME or CNAME flattening, that Cloudflare records must be "DNS only", that CAA records must allow `amazon.com`, and that the validation record must stay for renewals. A hostname another CloudFront distribution already has (in any AWS account) can't be attached; the deploy fails saying so.
+
+Any dashboard user can add or remove domains, like promoting. Apps need no changes: `/api/*` doesn't forward the `Host` header to the Express service, and the frontend only uses relative paths. An app that adds its own sign-in may have to allow the hostname with its provider (as a redirect URL or allowed origin, say).
+
 ## 6. Flows
 
 **New app**
@@ -846,14 +862,15 @@ Steps 1–3 prove the infrastructure and sign-in before any deployer code is wri
 
 ## 12. Open questions
 
-- How many colleagues are likely to use apps in the first few months? Above ~80, custom domains and a Clerk production instance move up the priority list.
-- When do we add custom domains (`*.apps.example.com`)?
+- How many colleagues are likely to use apps in the first few months? Above ~80, a shared apps domain and a Clerk production instance move up the priority list.
+- When do we give apps a shared domain (`*.apps.example.com`)? Per-app custom domains (5.10) exist; a shared one would also allow a Clerk production instance.
 - When do we add Google sign-in to the deployer dashboard?
 - What signals mean an app should move off auto-merge or admin-only promotion (customer data, external users)?
 
 ## 13. Future work
 
-- Custom domains with a wildcard certificate (ACM in `us-east-1` for CloudFront), and a Clerk production instance for prod.
+- A shared apps domain with a wildcard certificate (ACM in `us-east-1` for CloudFront), and a Clerk production instance for prod.
+- Buying domains through the deployer, and more than one hostname per environment (e.g. `www` and the root domain).
 - Per-app Clerk applications if Clerk's Platform API becomes available to us.
 - Google sign-in for the deployer dashboard.
 - Required reviews or AI review on PRs for apps that need them.

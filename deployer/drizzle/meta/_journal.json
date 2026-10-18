@@ -15,6 +15,13 @@
       "when": 1791869922050,
       "tag": "0001_webhook_deliveries",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1792358360792,
+      "tag": "0002_custom_domains",
+      "breakpoints": true
     }
   ]
 }

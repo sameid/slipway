@@ -4,7 +4,7 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import express from "express";
 import { parse } from "yaml";
-import type { Platform } from "./aws.js";
+import type { CertificateState, Platform } from "./aws.js";
 import { ProtectionUnavailable, type CommitStatus, type GitHub, type MergeResult, type OwnerType, type PullInfo } from "./github.js";
 import type { RunInfo, Runs, StartRunInput } from "./runs.js";
 
@@ -428,10 +428,98 @@ export class FakeRuns implements Runs {
   }
 }
 
+type FakeCertificate = {
+  arn: string;
+  hostname: string;
+  token: string;
+  tags: Record<string, string>;
+  status: string;
+  failureReason?: string;
+  inUse: boolean;
+  described: number;
+  requestedAt: number;
+};
+
 export class FakePlatform implements Platform {
   /** Names written; values are dropped so even fake mode can't read them back. */
   written: string[] = [];
   failedDeploys: { app: string; env: string; summary: string }[] = [];
+  certificates = new Map<string, FakeCertificate>();
+  private nextCertificate = 1;
+
+  /** autoIssueMs: in fake mode, certificates issue on their own this long after the request (tests call issue()). */
+  constructor(private opts: { autoIssueMs?: number; now?: () => number } = {}) {}
+
+  async requestCertificate(req: { hostname: string; idempotencyToken: string; tags: Record<string, string> }): Promise<string> {
+    // Like ACM: the same token for the same name returns the same certificate.
+    for (const c of this.certificates.values()) {
+      if (c.token === req.idempotencyToken && c.hostname === req.hostname) return c.arn;
+    }
+    const id = `00000000-0000-4000-8000-${String(this.nextCertificate++).padStart(12, "0")}`;
+    const arn = `arn:aws:acm:us-east-1:123456789012:certificate/${id}`;
+    this.certificates.set(arn, {
+      arn,
+      hostname: req.hostname,
+      token: req.idempotencyToken,
+      tags: req.tags,
+      status: "PENDING_VALIDATION",
+      inUse: false,
+      described: 0,
+      requestedAt: this.now(),
+    });
+    return arn;
+  }
+
+  async describeCertificate(arn: string): Promise<CertificateState> {
+    const c = this.certificates.get(arn);
+    if (!c) throw Object.assign(new Error(`no certificate ${arn}`), { name: "ResourceNotFoundException" });
+    c.described++;
+    const { autoIssueMs } = this.opts;
+    if (c.status === "PENDING_VALIDATION" && autoIssueMs !== undefined && this.now() - c.requestedAt >= autoIssueMs) {
+      c.status = "ISSUED";
+    }
+    const hash = createHash("sha256").update(c.hostname).digest("hex");
+    return {
+      status: c.status,
+      // ACM takes a moment to make the validation record; so does this.
+      record:
+        c.described > 1
+          ? { name: `_${hash.slice(0, 32)}.${c.hostname}.`, value: `_${hash.slice(32, 64)}.xlfgrmvvlj.acm-validations.aws.` }
+          : undefined,
+      failureReason: c.failureReason,
+      inUse: c.inUse,
+    };
+  }
+
+  async deleteCertificate(arn: string): Promise<"deleted" | "in_use" | "not_found"> {
+    const c = this.certificates.get(arn);
+    if (!c) return "not_found";
+    if (c.inUse) return "in_use";
+    this.certificates.delete(arn);
+    return "deleted";
+  }
+
+  /** The certificate for a hostname, for tests. */
+  certificate(hostname: string): FakeCertificate | undefined {
+    return [...this.certificates.values()].find((c) => c.hostname === hostname);
+  }
+
+  issue(hostname: string): void {
+    const c = this.certificate(hostname);
+    if (!c) throw new Error(`no certificate for ${hostname}`);
+    c.status = "ISSUED";
+  }
+
+  fail(hostname: string, reason = "CAA_ERROR"): void {
+    const c = this.certificate(hostname);
+    if (!c) throw new Error(`no certificate for ${hostname}`);
+    c.status = "FAILED";
+    c.failureReason = reason;
+  }
+
+  private now(): number {
+    return this.opts.now?.() ?? Date.now();
+  }
 
   async deployFailed(f: { app: string; env: "staging" | "prod"; summary: string; link: string }): Promise<void> {
     this.failedDeploys.push({ app: f.app, env: f.env, summary: f.summary });

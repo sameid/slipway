@@ -1,12 +1,12 @@
 // App secrets (design 5.8). Values go straight from a browser form to Parameter
 // Store; the deployer stores only who set which name and when.
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { and, desc, eq, inArray, isNull } from "drizzle-orm";
+import { and, eq, isNull } from "drizzle-orm";
 import { parseAppYaml, type AppYaml } from "./appyaml.js";
 import { iso, type Deps } from "./deps.js";
-import { jobs, secretLinks, secrets, type AppRow, type JobRow, type SecretLinkRow } from "./db/schema.js";
+import { secretLinks, secrets, type AppRow, type JobRow, type SecretLinkRow } from "./db/schema.js";
 import { ApiError } from "./errors.js";
-import { getApp, getRelease, queueDeploy } from "./jobs.js";
+import { queueRedeploy } from "./jobs.js";
 import { secretParameter, type AppEnv } from "./names.js";
 
 export const LINK_TTL_MS = 10 * 60_000;
@@ -123,7 +123,7 @@ export async function setSecret(deps: Deps, token: string, value: string): Promi
     throw new ApiError(502, "Couldn't save the value. Try again; if it keeps failing, the deployer's log has the reason.");
   }
 
-  const redeploy = queueSecretRedeploy(deps, link.app, env, link.createdBy);
+  const redeploy = queueRedeploy(deps, link.app, env, link.createdBy);
   deps.db
     .update(secretLinks)
     .set({ redeployJobId: redeploy?.id ?? null })
@@ -131,31 +131,6 @@ export async function setSecret(deps: Deps, token: string, value: string): Promi
     .run();
   deps.log("secret set", { app: link.app, env, key: link.key, by: link.createdBy, redeploy: redeploy?.id });
   return { link: { ...link, usedAt: now, redeployJobId: redeploy?.id ?? null }, redeploy };
-}
-
-/**
- * Containers read secrets at start, so a new value needs new tasks. A deploy that
- * hasn't started yet will start them anyway; otherwise redeploy what's running
- * (or about to be, if a deploy is in flight).
- */
-export function queueSecretRedeploy(deps: Deps, app: string, env: AppEnv, requestedBy: string): JobRow | null {
-  const pending = deps.db
-    .select()
-    .from(jobs)
-    .where(and(eq(jobs.app, app), eq(jobs.env, env), eq(jobs.kind, "deploy"), inArray(jobs.status, ["queued"])))
-    .orderBy(desc(jobs.id))
-    .get();
-  if (pending) return pending;
-  const running = deps.db
-    .select()
-    .from(jobs)
-    .where(and(eq(jobs.app, app), eq(jobs.env, env), eq(jobs.kind, "deploy"), eq(jobs.status, "running")))
-    .get();
-  const appRow = getApp(deps, app);
-  const releaseId = running?.releaseId ?? (env === "staging" ? appRow?.stagingReleaseId : appRow?.prodReleaseId);
-  const release = getRelease(deps, releaseId);
-  if (!release || release.status !== "ready") return null; // nothing deployed yet; the first deploy picks it up
-  return queueDeploy(deps, app, env, release, requestedBy);
 }
 
 /** Whether values can be set for an app: not while it's being torn down. */
@@ -197,7 +172,7 @@ export async function setSecrets(
     }
   }
   if (!saved.length) throw new ApiError(502, "Couldn't save any of the values. Try again, or check the deployer's log.");
-  const redeploy = queueSecretRedeploy(deps, app.name, env, by);
+  const redeploy = queueRedeploy(deps, app.name, env, by);
   deps.log("secrets set", { app: app.name, env, keys: saved, failed, by, redeploy: redeploy?.id });
   return { saved, failed, ignored, redeploy };
 }

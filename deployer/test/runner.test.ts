@@ -141,7 +141,12 @@ describe("runner", () => {
     const check = await client.start({ ...release(), env: { APP: "loan-tracker", COMMIT_SHA: "b".repeat(40), MODE: "check", PR_NUMBER: "7" } });
     const deploy = await client.start({
       kind: "deploy-env",
-      env: { APP: "loan-tracker", ENV: "staging", ACTION: "apply", DEPLOY_ID: "12" },
+      env: {
+        APP: "loan-tracker", ENV: "staging", ACTION: "apply", DEPLOY_ID: "12",
+        // A custom domain's inputs pass the contract too.
+        CUSTOM_DOMAIN: "loans.example.com",
+        CERTIFICATE_ARN: "arn:aws:acm:us-east-1:123456789012:certificate/0f0e0d0c-0000-4000-8000-000000000001",
+      },
     });
     expect((await until(client, check, ["succeeded", "failed"])).exported).toEqual({});
     expect((await client.logTail(check, 100)).join("\n")).not.toContain("step: publish");

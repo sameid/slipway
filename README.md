@@ -42,6 +42,10 @@ One person runs `/setup`; everyone else runs `/connect <deployer url>`.
 - **Org:** every member of the org can use the deployer.
 - **Personal account:** only you can, unless you add people with `slipway setup --yes --allowed-users <logins>`. They also need write access to the app repos, and only you can run `/new-app`, because nobody else can create repos in your account.
 
+## Your own domain
+
+Apps live on `https://dxxxx.cloudfront.net` addresses. To serve an app's staging or prod from a domain you already own, open the app on the dashboard and choose **Add a custom domain** under that environment. slipway requests a certificate for the name and shows two DNS records to create: one proves the name is yours, the other points it at the app. Once the certificate is issued, slipway redeploys the environment with the domain attached. If you set slipway up before custom domains existed, run `slipway setup --yes` again first, so the deployer may request certificates.
+
 ## Layout
 
 The repo is the plugin: Claude Code installs all of it, so `/setup` has the infrastructure code next to it.

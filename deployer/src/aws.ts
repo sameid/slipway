@@ -1,9 +1,26 @@
 // Parameter Store and Secrets Manager. The deployer can write app secret values
 // but never read them (design 5.8): there is deliberately no getter for /apps/*.
+// Also ACM, for custom domains' certificates.
+import {
+  ACMClient,
+  DeleteCertificateCommand,
+  DescribeCertificateCommand,
+  RequestCertificateCommand,
+} from "@aws-sdk/client-acm";
 import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { GetParameterCommand, PutParameterCommand, SSMClient } from "@aws-sdk/client-ssm";
 import { CloudWatchClient, PutMetricDataCommand } from "@aws-sdk/client-cloudwatch";
 import { PublishCommand, SNSClient } from "@aws-sdk/client-sns";
+
+export type CertificateState = {
+  /** ACM's: PENDING_VALIDATION, ISSUED, FAILED, VALIDATION_TIMED_OUT, REVOKED, EXPIRED, INACTIVE. */
+  status: string;
+  /** The CNAME that proves control of the name, once ACM has made it (a few seconds after the request). */
+  record?: { name: string; value: string };
+  failureReason?: string;
+  /** Whether something (CloudFront) uses it; ACM won't delete it until nothing does. */
+  inUse: boolean;
+};
 
 export interface Platform {
   /** Write /apps/<app>/<env>/<KEY> as a SecureString. */
@@ -13,6 +30,10 @@ export interface Platform {
    * foundation alarms on it) and, for prod, tell the dev team's SNS topic.
    */
   deployFailed(failure: { app: string; env: "staging" | "prod"; summary: string; link: string }): Promise<void>;
+  /** A DNS-validated certificate for a custom domain, in us-east-1 (CloudFront only uses those). Returns its ARN. */
+  requestCertificate(req: { hostname: string; idempotencyToken: string; tags: Record<string, string> }): Promise<string>;
+  describeCertificate(arn: string): Promise<CertificateState>;
+  deleteCertificate(arn: string): Promise<"deleted" | "in_use" | "not_found">;
 }
 
 /** Terraform creates SSM parameters with this value until someone sets them. */
@@ -22,6 +43,7 @@ export class AwsPlatform implements Platform {
   private ssm: SSMClient;
   private cloudwatch: CloudWatchClient;
   private sns: SNSClient;
+  private acm: ACMClient;
 
   constructor(
     private opts: { region: string; kmsKeyId?: string; alertsTopicArn?: string },
@@ -29,6 +51,44 @@ export class AwsPlatform implements Platform {
     this.ssm = new SSMClient({ region: opts.region });
     this.cloudwatch = new CloudWatchClient({ region: opts.region });
     this.sns = new SNSClient({ region: opts.region });
+    // CloudFront only uses certificates from us-east-1, wherever the app runs.
+    this.acm = new ACMClient({ region: "us-east-1" });
+  }
+
+  async requestCertificate(req: { hostname: string; idempotencyToken: string; tags: Record<string, string> }): Promise<string> {
+    const out = await this.acm.send(
+      new RequestCertificateCommand({
+        DomainName: req.hostname,
+        ValidationMethod: "DNS",
+        IdempotencyToken: req.idempotencyToken,
+        Tags: Object.entries(req.tags).map(([Key, Value]) => ({ Key, Value })),
+      }),
+    );
+    if (!out.CertificateArn) throw new Error("ACM returned no certificate ARN");
+    return out.CertificateArn;
+  }
+
+  async describeCertificate(arn: string): Promise<CertificateState> {
+    const { Certificate: c } = await this.acm.send(new DescribeCertificateCommand({ CertificateArn: arn }));
+    const record = c?.DomainValidationOptions?.[0]?.ResourceRecord;
+    return {
+      status: c?.Status ?? "UNKNOWN",
+      record: record?.Name && record.Value ? { name: record.Name, value: record.Value } : undefined,
+      failureReason: c?.FailureReason,
+      inUse: (c?.InUseBy?.length ?? 0) > 0,
+    };
+  }
+
+  async deleteCertificate(arn: string): Promise<"deleted" | "in_use" | "not_found"> {
+    try {
+      await this.acm.send(new DeleteCertificateCommand({ CertificateArn: arn }));
+      return "deleted";
+    } catch (err) {
+      const name = (err as { name?: string }).name;
+      if (name === "ResourceInUseException") return "in_use";
+      if (name === "ResourceNotFoundException") return "not_found";
+      throw err;
+    }
   }
 
   async deployFailed(f: { app: string; env: "staging" | "prod"; summary: string; link: string }): Promise<void> {

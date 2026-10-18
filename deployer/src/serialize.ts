@@ -2,6 +2,7 @@
 import { and, desc, eq, inArray } from "drizzle-orm";
 import type { Deps } from "./deps.js";
 import { jobs, pullRequests, releases, type AppRow, type JobRow, type ReleaseRow } from "./db/schema.js";
+import { getDomain } from "./domains.js";
 import { ACTIVE, getJob, getRelease } from "./jobs.js";
 import { shortSha, type AppEnv } from "./names.js";
 
@@ -84,8 +85,11 @@ export function appJson(deps: Deps, app: AppRow) {
   if (failedJob && !recent.some((j) => j.id === failedJob.id)) recent.push(failedJob);
   const env = (e: AppEnv) => {
     const deploy = lastDeploy(deps, app.name, e);
+    const domain = getDomain(deps, app.name, e);
     return {
       url: e === "staging" ? app.stagingUrl : app.prodUrl,
+      // Added on the dashboard; serves the app once active and its DNS points at url's host.
+      customDomain: domain ? { hostname: domain.hostname, status: domain.status } : null,
       release: releaseJson(getRelease(deps, e === "staging" ? app.stagingReleaseId : app.prodReleaseId)),
       lastDeploy: deploy ? jobJson(deps, deploy) : null,
     };

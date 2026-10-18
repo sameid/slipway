@@ -7,6 +7,7 @@ import { hashPassword, temporaryPassword } from "../auth/passwords.js";
 import { iso, type Deps } from "../deps.js";
 import { apps, jobs, pullRequests, releases, users, webhookDeliveries, type AppRow } from "../db/schema.js";
 import { KEEP_DELIVERIES } from "../deliveries.js";
+import { addDomain, cloudfrontHost, getDomain, removeDomain, retryDomain, type DomainChange } from "../domains.js";
 import { catchUpApp } from "../events.js";
 import { ACTIVE, enqueue, getApp, getJob, getRelease, queueDeploy, supersedeQueued } from "../jobs.js";
 import { ApiError } from "../errors.js";
@@ -120,6 +121,8 @@ export function dashboardRoutes(deps: Deps): express.Router {
       staging,
       prod: getRelease(deps, app.prodReleaseId),
       canPromote: !!staging && staging.status === "ready" && ["active", "failed"].includes(app.status),
+      domains: { staging: getDomain(deps, app.name, "staging"), prod: getDomain(deps, app.name, "prod") },
+      canChangeDomains: ["active", "failed"].includes(app.status),
       appUrl,
       shortSha,
     };
@@ -336,6 +339,83 @@ export function dashboardRoutes(deps: Deps): express.Router {
     );
     res.redirect(appUrl(app.name, "settings"));
   });
+
+  // --- Custom domains (domains.ts) ---
+
+  function renderDomain(res: Response, app: AppRow, env: AppEnv, error: string | null, status = 200, typed = ""): void {
+    const domain = getDomain(deps, app.name, env) ?? null;
+    const waiting = !!domain && ["requesting", "validating", "attaching", "removing"].includes(domain.status);
+    res.status(status).render("domain", {
+      title: `${app.name} ${env} domain`,
+      app,
+      env,
+      domain,
+      cdnHost: cloudfrontHost(app, env),
+      job: domain?.jobId ? getJob(deps, domain.jobId) : null,
+      canChange: ["active", "failed"].includes(app.status),
+      error,
+      typed,
+      // Only while something is happening, and there's no form to lose then.
+      refresh: waiting ? 15 : null,
+    });
+  }
+
+  router.get("/apps/:name/domains/:env", (req, res) => {
+    const app = getApp(deps, param(req, "name"));
+    const env = param(req, "env");
+    if (!app || !isAppEnv(env)) return notFound(res, "That page");
+    renderDomain(res, app, env, null);
+  });
+
+  router.post("/apps/:name/domains/:env", async (req, res) => {
+    const app = getApp(deps, param(req, "name"));
+    const env = param(req, "env");
+    if (!app || !isAppEnv(env)) return notFound(res, "That page");
+    const typed = typeof req.body?.hostname === "string" ? req.body.hostname.slice(0, 300) : "";
+    try {
+      const domain = await addDomain(deps, app, env, typed, req.user!.email);
+      flash(req, `Requested a certificate for ${domain.hostname}. Create the two DNS records below.`);
+    } catch (err) {
+      if (!(err instanceof ApiError)) throw err;
+      return renderDomain(res, app, env, err.message, err.status, typed);
+    }
+    res.redirect(`/apps/${app.name}/domains/${env}`);
+  });
+
+  const domainActions: Record<string, { run: typeof removeDomain; say: (c: DomainChange, env: AppEnv) => string }> = {
+    remove: {
+      run: removeDomain,
+      say: ({ hostname, job, done }, env) =>
+        done
+          ? `Removed ${hostname}.`
+          : job
+            ? `Removing ${hostname}: deploy job #${job.id} detaches it from ${env}, then its certificate is deleted.`
+            : `Removing ${hostname}. Its certificate is deleted once it's detached.`,
+    },
+    retry: {
+      run: retryDomain,
+      say: ({ hostname, job, done }, env) =>
+        done
+          ? `Requested a new certificate for ${hostname}. Its validation record is new: update the DNS record below.`
+          : job
+            ? `Retrying ${hostname} with deploy job #${job.id}.`
+            : `Retrying ${hostname} on the next deploy of ${env}.`,
+    },
+  };
+  for (const [action, { run, say }] of Object.entries(domainActions)) {
+    router.post(`/apps/:name/domains/:env/${action}`, async (req, res) => {
+      const app = getApp(deps, param(req, "name"));
+      const env = param(req, "env");
+      if (!app || !isAppEnv(env)) return notFound(res, "That page");
+      try {
+        flash(req, say(await run(deps, app, env, req.user!.email), env));
+      } catch (err) {
+        if (!(err instanceof ApiError)) throw err;
+        flash(req, err.message);
+      }
+      res.redirect(`/apps/${app.name}/domains/${env}`);
+    });
+  }
 
   router.post("/apps/:name/destroy", (req, res) => {
     const app = getApp(deps, param(req, "name"));

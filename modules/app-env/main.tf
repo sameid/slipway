@@ -406,6 +406,8 @@ locals {
   # Endpoint looks like https://<service>.ecs.<region>.on.aws/; CloudFront wants the bare host.
   express_endpoint = local.create_service ? aws_ecs_express_gateway_service.api[0].ingress_paths[0].endpoint : ""
   express_host     = local.create_service ? regex("^(?:https?://)?([^/]+)", local.express_endpoint)[0] : ""
+
+  has_domain = var.custom_domain != ""
 }
 
 # ---------------------------------------------------------------------------
@@ -467,6 +469,9 @@ resource "aws_cloudfront_distribution" "web" {
   default_root_object = "index.html"
   price_class         = "PriceClass_100"
   http_version        = "http2and3"
+  # The custom domain, if any. The /api/* behaviour doesn't forward Host, so the
+  # Express load balancer never sees it.
+  aliases = local.has_domain ? [var.custom_domain] : []
 
   origin {
     origin_id                = "web"
@@ -527,8 +532,13 @@ resource "aws_cloudfront_distribution" "web" {
     }
   }
 
+  # CloudFront only accepts the alias with a certificate that covers it. The
+  # default certificate requires the provider's default minimum (TLSv1).
   viewer_certificate {
-    cloudfront_default_certificate = true
+    cloudfront_default_certificate = !local.has_domain
+    acm_certificate_arn            = local.has_domain ? var.certificate_arn : null
+    ssl_support_method             = local.has_domain ? "sni-only" : null
+    minimum_protocol_version       = local.has_domain ? "TLSv1.2_2021" : null
   }
 }
 

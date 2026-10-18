@@ -104,7 +104,7 @@ Runs survive a runner restart: queued runs stay queued; runs that were running e
 
 **Run directory.** `/var/lib/slipway-runner/runs/<id>/` holds `run.json`, `log`, `exports.env` and `work/`. `work/` is deleted when the run ends; run directories are deleted after 30 days.
 
-**AWS credentials.** The runner uses the instance role directly (`RUNNER_PUBLISH_PROFILE` and `RUNNER_DEPLOY_PROFILE` are empty, so no `AWS_PROFILE` is set). Anything running as `slipway` or `slipway-runner` has the instance role's permissions; `slipway-build` has none, because it can't reach the metadata service. The instance role can do anything in the region except IAM, STS, Organizations and Account actions. Outside the region it can manage only `app-*` IAM roles (which must carry `slipway-boundary`), CloudFront distributions tagged `platform=slipway`, and `app-*` CloudFront functions.
+**AWS credentials.** The runner uses the instance role directly (`RUNNER_PUBLISH_PROFILE` and `RUNNER_DEPLOY_PROFILE` are empty, so no `AWS_PROFILE` is set). Anything running as `slipway` or `slipway-runner` has the instance role's permissions; `slipway-build` has none, because it can't reach the metadata service. The instance role can do anything in the region except IAM, STS, Organizations and Account actions. Outside the region it can manage only `app-*` IAM roles (which must carry `slipway-boundary`), CloudFront distributions tagged `platform=slipway`, `app-*` CloudFront functions, and ACM certificates in `us-east-1` tagged `platform=slipway` (requested DNS-validated, for custom domains).
 
 **Build user handoff.** pm2 drops supplementary groups, so the handoff uses modes and an ACL. The run directory stays the runner's (`0750`); while a build runs, an ACL gives `slipway-build` only traverse (`x`) on it. `work/` is `0777`: only the runner and `slipway-build` can reach it, so its "other" bits are effectively the build user's. `prepare` makes the source `a+rwX`, and `verify` leaves its output `a+rX` for the image and publish phases. When the run ends the runner deletes `work/` as `slipway-build` (`sudo -n -H -u slipway-build`) and removes the ACL. `verify` runs under `env -i`, without AWS variables, and its exports go to `/dev/null`.
 
@@ -159,12 +159,16 @@ Started by the deployer with `POST /runs`, `kind: "deploy-env"`, no source, and 
 | `IMAGE_DIGEST` | `sha256:...` (staging/prod apply) |
 | `WEB_ARTIFACT` | `s3://...web.tgz` (staging/prod apply) |
 | `DEPLOY_ID` | the deployer's job id. Goes into the container environment as `DEPLOY_ID`, so every deploy starts new tasks even when the image is unchanged (needed after a secret changes) |
+| `CUSTOM_DOMAIN` | a hostname added on the dashboard, while it's attaching or attached (staging/prod apply). Sent with `CERTIFICATE_ARN` or not at all; an apply without them detaches the domain |
+| `CERTIFICATE_ARN` | the domain's ACM certificate, in `us-east-1` |
 
 `jobs/deploy-env.sh` runs as `slipway-runner` with the instance role. It never executes app code.
 
 `app.yaml` comes from `releases/<app>/<sha>/app.yaml`; source zips aren't kept after a build.
 
-Apply for staging/prod follows design 5.6: `secrets-check` → `terraform-phase1` (migrate image = new, service image and deploy id = what the state currently runs) → `migrate` (one-off Fargate task in the public subnets with a public IP, using the env's task security group; print its logs; fail on non-zero exit) → `rollout-settings` (once the service exists: shorter canary bake times, 0 and 0 minutes for staging and 2 and 1 for prod, and health checks every 10s with 2 to pass on both of its target groups, set on the ECS service and target groups directly because Express Mode's Terraform resource can't; best effort, a failure only warns) → `terraform-phase2` (service image = new, deploy id = `DEPLOY_ID`; waits for steady state; creates CloudFront on the first deploy; then the rollout settings again, which also shows whether Express Mode kept them) → `web-sync` (upload `web.tgz`: `assets/` with immutable caching and never deleted, so pages still open in a browser keep working; every other file `no-cache`, copied rather than synced so a rollback's older `index.html` still overwrites; `config.json` with `no-store`; then invalidate) → `health-check` (`GET <app url>/api/health` until it returns 200 and `release` equals the short SHA).
+Apply for staging/prod follows design 5.6: `secrets-check` → `terraform-phase1` (migrate image = new, service image and deploy id = what the state currently runs) → `migrate` (one-off Fargate task in the public subnets with a public IP, using the env's task security group; print its logs; fail on non-zero exit) → `rollout-settings` (once the service exists: shorter canary bake times, 0 and 0 minutes for staging and 2 and 1 for prod, and health checks every 10s with 2 to pass on both of its target groups, set on the ECS service and target groups directly because Express Mode's Terraform resource can't; best effort, a failure only warns) → `terraform-phase2` (service image = new, deploy id = `DEPLOY_ID`; waits for steady state; creates CloudFront on the first deploy; then the rollout settings again, which also shows whether Express Mode kept them) → `web-sync` (upload `web.tgz`: `assets/` with immutable caching and never deleted, so pages still open in a browser keep working; every other file `no-cache`, copied rather than synced so a rollback's older `index.html` still overwrites; `config.json` with `no-store`; then invalidate) → `health-check` (`GET <app url>/api/health` until it returns 200 and `release` equals the short SHA; with a custom domain, also one request for it sent straight to CloudFront, only logged, because its DNS is its owner's to set up).
+
+Both Terraform phases pass `custom_domain` and `certificate_arn` (empty without a domain), so phase 1 already attaches or detaches the domain, before the migration. If CloudFront refuses the hostname because another distribution has it (in any AWS account), the job fails with an `ERROR:` line saying so.
 
 Destroy: prod first turns off deletion protection (apply with `destroying = true`) and keeps a final snapshot `app-<app>-prod-final-<UTC timestamp>`; then `terraform destroy`; then delete `/apps/<app>/<env>/*` parameters. Shared destroy deletes the ECR repo (force), the log group and `releases/<app>/`. The deployer sends `DEPLOY_ID` on every staging/prod job, destroys included.
 
@@ -182,9 +186,9 @@ Exports: `APP_URL` (`https://dxxxx.cloudfront.net`, staging/prod apply), `SERVIC
 
 `modules/app-shared` (inputs: `app`) → outputs `ecr_repository_url`, `ecr_repository_name`, `log_group_name`.
 
-`modules/app-env` inputs: `app`, `env`, `size` (`small` | `medium` | `large`), `api_port`, `health_check_path`, `migrate_command` (list), `secret_names` (list), `service_image` (full reference `<repo url>@sha256:...`; `""` = no service and no CloudFront yet), `migrate_image` (same form; `""` = no migrate task definition), `release` (short SHA, container `RELEASE`), `deploy_id`, `destroying` (bool). Everything else (default VPC and subnets, boundary, Express infra role, alerts topic, ECR repo, log group) is found by the conventions above.
+`modules/app-env` inputs: `app`, `env`, `size` (`small` | `medium` | `large`), `api_port`, `health_check_path`, `migrate_command` (list), `secret_names` (list), `service_image` (full reference `<repo url>@sha256:...`; `""` = no service and no CloudFront yet), `migrate_image` (same form; `""` = no migrate task definition), `release` (short SHA, container `RELEASE`), `deploy_id`, `custom_domain` and `certificate_arn` (both or neither; the distribution's alias and its us-east-1 certificate), `destroying` (bool). Everything else (default VPC and subnets, boundary, Express infra role, alerts topic, ECR repo, log group) is found by the conventions above.
 
-Outputs (all strings): `app_url`, `service_url`, `service_name`, `service_image`, `migrate_image`, `release`, `deploy_id`, `cluster_name`, `migrate_task_definition_arn`, `subnet_ids` (comma-joined default subnets), `task_security_group_id`, `web_bucket`, `distribution_id`, `log_group_name`, `env`, `inputs` (the JSON of the `app.yaml`-derived inputs, which teardown re-applies so lifting deletion protection never resizes anything).
+Outputs (all strings): `app_url`, `service_url`, `service_name`, `service_image`, `migrate_image`, `release`, `deploy_id`, `cluster_name`, `migrate_task_definition_arn`, `subnet_ids` (comma-joined default subnets), `task_security_group_id`, `web_bucket`, `distribution_id`, `log_group_name`, `env`, `custom_domain` and `certificate_arn` (read back by the prod destroy re-apply), `inputs` (the JSON of the `app.yaml`-derived inputs, which teardown re-applies so lifting deletion protection never resizes anything).
 
 Sizes:
 
@@ -239,7 +243,12 @@ type Job = {
   dashboardUrl: string;   // "<deployer>/apps/<app>/jobs/<id>"
 };
 type Release = { id: number; commitSha: string; shortSha: string; status: "building" | "ready" | "failed"; imageDigest: string | null; createdAt: string };
-type EnvState = { url: string | null; release: Release | null; lastDeploy: Job | null };
+type EnvState = {
+  url: string | null;             // the CloudFront URL; it always works
+  customDomain: { hostname: string; status: "requesting" | "validating" | "attaching" | "active" | "failed" | "removing" } | null;
+  release: Release | null;
+  lastDeploy: Job | null;
+};
 type App = {
   name: string; repo: string; repoUrl: string; owner: string;
   status: "registering" | "active" | "destroy_requested" | "destroying" | "destroyed" | "failed";

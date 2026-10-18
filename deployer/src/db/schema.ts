@@ -152,6 +152,33 @@ export const webhookDeliveries = sqliteTable(
   (t) => [index("webhook_deliveries_app").on(t.app, t.id)],
 );
 
+// Custom domains people add on the dashboard: at most one per app env (domains.ts
+// enforces it). The certificate is ACM's, in us-east-1, where CloudFront looks.
+export const domains = sqliteTable(
+  "domains",
+  {
+    id: integer().primaryKey({ autoIncrement: true }),
+    app: text()
+      .notNull()
+      .references(() => apps.name),
+    env: text().notNull(), // staging | prod
+    hostname: text().notNull().unique(), // lowercase, no trailing dot
+    // requesting | validating | attaching | active | failed | removing (domains.ts)
+    status: text().notNull(),
+    certificateArn: text("certificate_arn"),
+    // The CNAME that proves control of the name to ACM; filled in once ACM has it.
+    validationName: text("validation_name"),
+    validationValue: text("validation_value"),
+    error: text(),
+    jobId: integer("job_id"), // the deploy attaching or detaching it
+    createdBy: text("created_by").notNull(),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+    checkedAt: text("checked_at"), // last look at the certificate
+  },
+  (t) => [index("domains_app_env").on(t.app, t.env)],
+);
+
 // Failed dashboard logins, for rate limiting. key is "email:<email>" or "ip:<address>".
 export const loginFailures = sqliteTable(
   "login_failures",
@@ -175,3 +202,4 @@ export type JobRow = typeof jobs.$inferSelect;
 export type PullRequestRow = typeof pullRequests.$inferSelect;
 export type SecretLinkRow = typeof secretLinks.$inferSelect;
 export type WebhookDeliveryRow = typeof webhookDeliveries.$inferSelect;
+export type DomainRow = typeof domains.$inferSelect;

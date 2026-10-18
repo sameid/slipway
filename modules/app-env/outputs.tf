@@ -30,6 +30,15 @@ output "migrate_image" {
   value = var.migrate_image
 }
 
+# The custom domain applied, if any; the prod destroy re-apply passes it back.
+output "custom_domain" {
+  value = var.custom_domain
+}
+
+output "certificate_arn" {
+  value = var.certificate_arn
+}
+
 output "migrate_task_definition_arn" {
   value = local.create_migrate ? aws_ecs_task_definition.migrate[0].arn : ""
 }

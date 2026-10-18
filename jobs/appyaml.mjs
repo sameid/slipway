@@ -204,7 +204,7 @@ export function renderShared({ app, outDir, modulesDir, stateBucket, region, ver
 export const ENV_OUTPUTS = [
   "app_url", "service_url", "service_name", "service_image", "migrate_image", "release", "deploy_id",
   "cluster_name", "migrate_task_definition_arn", "subnet_ids", "task_security_group_id", "web_bucket",
-  "distribution_id", "log_group_name", "env", "inputs",
+  "distribution_id", "log_group_name", "env", "custom_domain", "certificate_arn", "inputs",
 ];
 
 /** Module inputs for an environment from a validated app.yaml config. */
@@ -231,6 +231,9 @@ export function renderEnv({ app, env, inputs, outDir, modulesDir, stateBucket, r
     migrate_image: { type: "string", default: "" },
     release: { type: "string", default: "" },
     deploy_id: { type: "string", default: "" },
+    // A custom domain added on the dashboard and its us-east-1 certificate.
+    custom_domain: { type: "string", default: "" },
+    certificate_arn: { type: "string", default: "" },
     destroying: { type: "bool", default: false },
   };
   return {

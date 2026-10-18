@@ -32,6 +32,7 @@
         <p>Release <%- include("partials/sha", { sha: staging.commitSha, shaRepo: app.repo }) %> <span class="text-muted">#<%= staging.id %></span></p>
       <% } else { %><p class="text-muted">Not deployed yet.</p><% } %>
       <% if (app.stagingUrl) { %><p><a class="link" href="<%= app.stagingUrl %>"><%= app.stagingUrl %></a></p><% } %>
+      <%- include("partials/env-domain", { env: "staging", domain: domains.staging, deployed: !!app.stagingUrl }) %>
     </div>
     <% if (canPromote) { %>
     <div class="card__footer gap-3">
@@ -50,6 +51,7 @@
         <p>Release <%- include("partials/sha", { sha: prod.commitSha, shaRepo: app.repo }) %> <span class="text-muted">#<%= prod.id %></span></p>
       <% } else { %><p class="text-muted">Not deployed yet. The first promote creates prod, with an empty database.</p><% } %>
       <% if (app.prodUrl) { %><p><a class="link" href="<%= app.prodUrl %>"><%= app.prodUrl %></a></p><% } %>
+      <%- include("partials/env-domain", { env: "prod", domain: domains.prod, deployed: !!app.prodUrl }) %>
     </div>
   </div>
 </div>

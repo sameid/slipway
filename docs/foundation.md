@@ -173,7 +173,8 @@ There's no command for this; it deletes everything, so it's deliberately manual.
 - manage IAM roles named `app-*` that carry the `slipway-boundary` permissions boundary, and pass them to ECS;
 - create CloudFront distributions, and change or delete only those tagged `platform=slipway` with an `app` tag (the deployer's own has no `app` tag);
 - tag a distribution `platform=slipway`, which creating one with tags needs. That would also let it tag one of the account's other distributions and then manage it, so the tag scoping guards against accidents, not against a compromised instance: another reason for a dedicated account;
-- create CloudFront functions named `app-*` and origin access controls.
+- create CloudFront functions named `app-*` and origin access controls;
+- request certificates in ACM in `us-east-1` (DNS-validated, tagged `platform=slipway`) for custom domains, and describe or delete only certificates tagged that way.
 
 IAM and STS are excluded even inside the region, so the box can't assume other roles in the account.
 

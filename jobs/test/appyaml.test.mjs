@@ -106,6 +106,9 @@ test("renders the env root config with a relative module source and the contract
   assert.deepEqual(root.module.env.secret_names, ["STRIPE_KEY", "OPENAI_API_KEY"]);
   assert.equal(root.module.env.service_image, "${var.service_image}");
   assert.equal(root.variable.destroying.type, "bool");
+  assert.equal(root.module.env.custom_domain, "${var.custom_domain}");
+  assert.equal(root.module.env.certificate_arn, "${var.certificate_arn}");
+  assert.deepEqual(root.variable.custom_domain, { type: "string", default: "" });
   assert.deepEqual(Object.keys(root.output), ENV_OUTPUTS);
 });
 

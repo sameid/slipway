@@ -22,6 +22,7 @@
     "create-admin": "tsx --env-file-if-exists=.env src/scripts/create-admin.ts"
   },
   "dependencies": {
+    "@aws-sdk/client-acm": "^3.1149.0",
     "@aws-sdk/client-cloudwatch": "^3.1149.0",
     "@aws-sdk/client-secrets-manager": "^3.1149.0",
     "@aws-sdk/client-sns": "^3.1149.0",
