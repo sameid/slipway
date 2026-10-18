@@ -5,7 +5,7 @@
 **Last updated:** October 12, 2026
 **Region:** `ca-west-1` (Canada West, Calgary) for the first deployment; now any region you choose, dedicated to slipway (item 11)
 
-> This design was written for slipway's first deployment: one company's GitHub org and one AWS account in `ca-west-1`. Keep reading it for the reasoning. For the current setup, where anyone installs the plugin and `/setup` puts slipway in their own AWS account with apps under their own GitHub org or personal account (items 11–13), [foundation.md](foundation.md) and [contracts.md](contracts.md) win where they differ. Here, `acme` stands for the GitHub owner that holds app repos, and "the dev team" for whoever runs your slipway. Apps no longer come with sign-in (item 12): wherever this document mentions Clerk, read "no sign-in until the app's developer adds authentication".
+> This design was written for slipway's first deployment: one company's GitHub org and one AWS account in `ca-west-1`. Keep reading it for the reasoning. For the current setup, where anyone installs the plugin and `/setup` puts slipway in their own AWS account with apps under their own GitHub org or personal account (items 11–13), [foundation.md](foundation.md) and [contracts.md](contracts.md) win where they differ. Here, `acme` stands for the GitHub owner that holds app repos, and "the dev team" for whoever runs your slipway.
 
 ## Changes since Draft v7
 
@@ -15,12 +15,12 @@ These changes came out of building the platform and checking the region. Where t
 2. **Isolation on the box.** The deployer, the runner and untrusted build steps run as three Linux users. Anything that executes app code (`npm ci`, type check, lint, tests, frontend build) runs as `slipway-build`, which can't reach the instance's AWS credentials, the deployer's data or its port. Docker image builds and Terraform run as the runner.
 3. **The deployer holds deploy permissions.** Section 7's "the deployer holds the least AWS power" no longer holds: the instance role can do anything in its region (the region is dedicated to slipway). It can manage only slipway's own resources in the global services (IAM, CloudFront, S3). Roles that app deploys create still carry the `slipway-boundary` permissions boundary. Isolation now rests on untrusted code running without credentials.
 4. **Deployer hosting.** One `t3.small` (x86_64, because it builds `linux/amd64` images) in a public subnet of the default VPC, with an Elastic IP. pm2 runs the deployer and the runner and rotates their logs (pm2-logrotate); Caddy listens on port 8080. CloudFront stays in front for HTTPS. The instance accepts traffic only from CloudFront's origin-facing IP ranges, and Caddy rejects requests without CloudFront's secret origin header. The CloudFront-to-instance hop is plain HTTP. No private subnets, no NAT gateway, no VPC origin.
-5. **Lean foundation.** The default VPC replaces the custom one. One artifacts bucket holds app releases and deployer releases. The AWS-managed `aws/ssm` key replaces the platform KMS key: the deployer still can't read secret values, because it has no `ssm:GetParameter` on `/apps/*`. Platform secrets (one per Clerk application holding both of its keys, and the GitHub App) are created by hand when their values exist, not by Terraform. Parameter Store holds only app secrets. Per-app modules find shared resources by naming convention.
+5. **Lean foundation.** The default VPC replaces the custom one. One artifacts bucket holds app releases and deployer releases. The AWS-managed `aws/ssm` key replaces the platform KMS key: the deployer still can't read secret values, because it has no `ssm:GetParameter` on `/apps/*`. The platform's one secret, the GitHub App's keys (`slipway/github-app`), is created outside Terraform, by `/setup` (item 13). Parameter Store holds only app secrets. Per-app modules find shared resources by naming convention.
 6. **Database classes.** RDS in `ca-west-1` offers no `db.t4g` classes for Postgres. The size presets use `db.t3.micro`, `db.t3.small` and `db.t3.medium`, in every region.
 7. **App images are x86.** The Terraform resource for Express Mode has no CPU architecture setting, so app tasks run on X86_64, not Graviton.
 8. **No Litestream, no deployer backups yet.** The deployer's SQLite database lives only on the instance's EBS volume. EC2's automatic recovery keeps the volume, but replacing or terminating the instance loses the dashboard accounts, the app registry and job history (apps keep running). EBS snapshots will be added later. Until then, wherever this document mentions Litestream, there is no replication.
 9. **Known open risk: the GitHub App sees every repo of its owner.** The deployer's App is installed on all repositories of the org or personal account that owns app repos. Anyone who compromises the deployer instance gets write access to their contents and settings, so use an org (or account) that holds only slipway apps. The plan is to narrow this later. One option: drop the Administration and Members permissions, install on selected repositories, and have `/new-app` add each app repo and set its branch protection with the colleague's own `gh` login. Another: a separate GitHub org for slipway apps.
-10. **Names.** The product is slipway. Each install creates its own GitHub App with a name of its choosing (App names are unique across GitHub; for example `slipway-<owner>`), and its own Clerk applications (suggested: `slipway-local`, `slipway-stage`, `slipway-production`). Commit statuses are `slipway/check` and `slipway/deploy-*`. The stack skill is `slipway-stack`. The plugin marketplace is `slipway`.
+10. **Names.** The product is slipway. Each install creates its own GitHub App with a name of its choosing (App names are unique across GitHub; for example `slipway-<owner>`). Commit statuses are `slipway/check` and `slipway/deploy-*`. The stack skill is `slipway-stack`. The plugin marketplace is `slipway`.
 11. **Bring your own GitHub and AWS.** slipway is self-hosted: anyone runs it in their own AWS account and on their own GitHub org or personal account.
     - **Owner.** `github_owner` names the org or personal account that owns app repos. The deployer finds its App's installation on it as an org or as a user, and asks GitHub for its own slug (`GET /app`) instead of being configured with it.
     - **Access.** In an org, plugin API access is org membership, as before. On a personal account, it's the owner plus `github_allowed_users`; only the owner can run `/new-app`, because nobody else can create repos there.
@@ -29,7 +29,7 @@ These changes came out of building the platform and checking the region. Where t
     - **Region.** Required everywhere (Terraform, the deployer, the runner, `release.sh`), with no default. It must still be dedicated to slipway; a dedicated AWS account is best.
     - **Plugin setup.** The plugin has no built-in org or deployer URL: it saves one in `~/.config/slipway/config.json` (`/setup` or `/connect`, item 13) and learns the owner and the CODEOWNERS entry from `GET /api/whoami`.
     - **One repo.** The platform and the plugin live in one repo, which is also the plugin's root (item 13); the plugin's commands, skills, hooks, CLI and template are in `plugin/`.
-12. **No sign-in.** The platform no longer includes Clerk or any other auth provider: a new app is public to anyone with its link, and whether and how to add sign-in is up to its developer. Gone with it: the Clerk applications and their `slipway/clerk/*` secrets (items 5 and 10), the `auth` field in `app.yaml`, the `CLERK_*` container variables, the Clerk key in `config.json` (it now holds only `env` and `release`), the deployer's `GET /api/dev-config`, and the template's `requireUser` and `users` table (its sample is now a public notes list). A provider's secret key is an app secret like any other (`secrets:` in `app.yaml`, set with `/secret`).
+12. **No sign-in by default.** The platform includes no auth provider: a new app is public to anyone with its link, and whether and how to add sign-in (which provider, who may sign in) is up to its developer. `app.yaml` has no auth setting, `config.json` holds only `env` and `release`, and the template's sample is a public notes list. A provider's secret key is an app secret like any other (`secrets:` in `app.yaml`, set with `/secret`); a publishable key can reach the frontend through an API route. Section 5.2 has the details.
 13. **A public plugin that sets itself up.** Anyone installs the plugin from the public marketplace and runs `/setup`. It puts slipway in their own AWS account, using their own AWS credentials. That's the only time the plugin uses AWS credentials; everything after goes through the deployer's API, as before. It:
     - creates the state bucket with the AWS CLI (the Terraform bootstrap stack is gone);
     - applies the foundation from a copy of the plugin's own `foundation/`, with its inputs stored next to its state, and stops before any plan that replaces or deletes a resource;
@@ -42,7 +42,7 @@ These changes came out of building the platform and checking the region. Where t
 
 ## 1. Summary
 
-Colleagues run `/new-app` from our **slipway** Claude Code plugin and get back a GitHub repo and a working staging link a few minutes later. Every app gets its own staging and prod environments in our AWS account in `ca-west-1`: a Postgres database on RDS, an API on ECS Express Mode, and a frontend on S3 + CloudFront. Sign-in is handled by Clerk, already wired into the template.
+Colleagues run `/new-app` from our **slipway** Claude Code plugin and get back a GitHub repo and a working staging link a few minutes later. Every app gets its own staging and prod environments in our AWS account in `ca-west-1`: a Postgres database on RDS, an API on ECS Express Mode, and a frontend on S3 + CloudFront. Apps have no sign-in until their developer adds the authentication they want.
 
 A small deployer service, one Node.js process on one EC2 instance, watches GitHub. Pull requests merge automatically once their checks pass, and every merge to `main` deploys to staging. A dashboard lets anyone with a deployer account promote a staging release to prod, or roll back.
 
@@ -52,7 +52,7 @@ Agents write code and open pull requests. They never deploy. All builds and depl
 
 **Goals**
 
-- One command from idea to a live staging URL with working sign-in, with no AWS knowledge or credentials on colleagues' laptops.
+- One command from idea to a live staging URL, with no AWS knowledge or credentials on colleagues' laptops.
 - Move fast: in v1, a passing PR is merged and on staging within minutes, with no waiting for review.
 - One GitHub repo per app, holding the app's code and nothing about how it's deployed.
 - Identical staging and prod environments, with prod getting the exact build that was tested on staging.
@@ -74,7 +74,7 @@ Agents write code and open pull requests. They never deploy. All builds and depl
 1. Install the plugin once: `/plugin marketplace add sameid/slipway`, then install `slipway`.
 2. Run `/new-app`. Answer three questions: app name, template, one-line description.
 3. The plugin creates `acme/<name>` on GitHub from the template, registers it with the deployer, and waits.
-4. About 10–15 minutes later (mostly RDS creating the database), the plugin prints the staging link. Opening it shows a Clerk sign-in screen; signing in with an email Clerk allows works immediately.
+4. About 10–15 minutes later (mostly RDS creating the database), the plugin prints the staging link. The app is public: anyone with the link can open it until the developer adds sign-in.
 5. Build features with Claude Code. Nothing runs on the laptop: every change is previewed on staging. `/ship` commits to a branch and opens a PR. Once the checks pass, the deployer merges it and deploys staging. `/ship` waits and prints the updated staging link.
 6. `/status` shows what's on staging and prod.
 7. When ready for prod, sign in to the deployer dashboard and press Promote.
@@ -99,9 +99,7 @@ flowchart TD
         CFA -->|/api/*| ECS[ECS Express service]
         ECS --> RDS[(RDS Postgres)]
     end
-    Browser[App users] -->|sign in| CLERK[Clerk]
-    Browser --> CFA
-    ECS -->|verify session JWT via JWKS| CLERK
+    Browser[App users] --> CFA
 ```
 
 There's one platform repo (originally two), plus one repo per app:
@@ -179,7 +177,6 @@ The skill never works directly in the main checkout. The main checkout stays on 
 - Hooks stop the agent from editing `.github/`, `CODEOWNERS` and the platform-owned fields in `app.yaml`.
 - Claude never pushes to `main`. Branch protection enforces this on GitHub regardless.
 - Colleagues need no AWS credentials. The plugin only uses `gh` and the deployer API.
-- No Clerk keys reach a laptop. Staging and prod Clerk secret keys stay in AWS.
 - Secret values never pass through the Claude Code conversation. `/secret set` hands back a browser link instead (see 5.8).
 
 ### 5.2 App repo and default template
@@ -189,7 +186,7 @@ The skill never works directly in the main checkout. The main checkout stays on 
 | Layer | Choice |
 |---|---|
 | Frontend | React, TanStack Query, Tailwind CSS, built with Vite |
-| Auth | Clerk (React SDK in the frontend, `@clerk/express` in the API) |
+| Auth | None: the app's developer chooses a provider and adds it |
 | Backend | Node.js, Express, Drizzle ORM (`node-postgres` driver) |
 | Database | Postgres on RDS |
 | Tests | Vitest for both packages |
@@ -202,12 +199,12 @@ my-app/
   package.json          # npm workspaces: api, web
   api/
     src/
-      index.ts          # Express app; clerkMiddleware(); routes under /api
-      auth.ts           # requireUser middleware: 401 if signed out, upserts local user
+      index.ts          # starts the server on PORT
+      app.ts            # Express app; routes under /api, including /api/health
       routes/
-        me.ts           # GET /api/me: the signed-in user's local record
+        notes.ts        # the sample: a public notes list, to replace
       db/
-        schema.ts       # Drizzle schema, starts with a users table
+        schema.ts       # Drizzle schema, starts with a notes table
         client.ts       # connection pool, reads DB secret (see below)
       migrate.ts        # runs Drizzle migrations; compiled to dist/migrate.js
     drizzle/            # generated SQL migrations (drizzle-kit generate)
@@ -215,9 +212,9 @@ my-app/
     Dockerfile
   web/
     src/
-      main.tsx          # loads /config.json, then ClerkProvider + QueryClientProvider
-      api.ts            # fetch helper: relative /api paths + Clerk session token
-      App.tsx           # signed-out: <SignIn />; signed-in: app + <UserButton />
+      main.tsx          # loads /config.json, then QueryClientProvider
+      api.ts            # fetch helper (relative /api paths) and TanStack Query hooks
+      App.tsx           # the sample notes page
     vite.config.ts      # dev server proxies /api to localhost:3000, serves config.json
     tailwind.config.ts
   CLAUDE.md             # conventions Claude Code follows in the repo
@@ -229,26 +226,20 @@ The app repo contains **no Terraform and no build scripts**. All infrastructure 
 **Template conventions** (also in the `slipway-stack` skill and `CLAUDE.md`)
 
 - Every API route lives under `/api`. The frontend only uses relative `/api/...` URLs, so the same build works locally, on staging and on prod.
-- Every API route except `/api/health` uses `requireUser`. Public routes must be added deliberately.
+- There's no sign-in, so every page and API route is public. Nothing that shouldn't be public (personal data, internal documents, anything per-user) is stored or shown until the app has authentication.
 - Schema changes go in `api/src/db/schema.ts`, followed by `drizzle-kit generate` to create a migration. Migrations are committed and must be additive and backward compatible (add columns and tables; drop things in a later release).
 - Server state in the frontend goes through TanStack Query hooks using the `api.ts` helper; no ad hoc `fetch` calls in components.
 - `GET /api/health` is public and returns 200 only when the database is reachable.
 - Third-party keys are read from `process.env`, declared by name in `app.yaml`, and never committed (see 5.8).
 
-**Auth with Clerk**
+**Adding sign-in**
 
-*Frontend*
+Apps start without sign-in, and the platform has no auth provider and no auth settings: nothing in `app.yaml`, the per-app module or the deployer depends on one. Which provider to use and who may sign in is the app developer's decision, so the agent asks before building anything that needs to know who the user is, rather than hand-rolling a login (`CLAUDE.md` and the `slipway-stack` skill say so). Once an app adds a provider:
 
-- `main.tsx` fetches `/config.json` (written per environment at deploy time) to get the Clerk publishable key, then renders `ClerkProvider` with it. Loading the key at runtime keeps the frontend build identical across environments.
-- Signed-out users see Clerk's `<SignIn />`; signed-in users get the app with a `<UserButton />`.
-- `api.ts` gets the session token from Clerk's `getToken()` and sends it as `Authorization: Bearer <token>` on every request. Using the header rather than relying on cookies behaves the same with development and production Clerk instances.
-
-*Backend*
-
-- `clerkMiddleware()` from `@clerk/express` runs on every request. It reads the session token from the request's cookies and headers and verifies it locally against Clerk's public keys, so checking a session costs no Clerk API call.
-- `requireUser` (in `auth.ts`) calls `getAuth(req)`. If the user isn't authenticated it returns `401` JSON. The template avoids Clerk's `requireAuth()`, which redirects instead of returning 401, the wrong behavior for a JSON API.
-- On a user's first request, `requireUser` upserts a row in the app's own `users` table keyed by the Clerk user ID, copying name and email from the session's claims. App data references this local row. This also avoids calling Clerk's Backend API on every request, which matters because the Backend API is rate limited per Clerk instance and all apps share an instance (see 5.4).
-- Authorization (who may do what within an app) is the app's job, in its own tables. Being signed in to Clerk only proves the user is a colleague.
+- Its secret key is an app secret like any other: declared under `secrets:` and set per environment with `/secret` (5.8). A publishable key can reach the frontend through an API route; `config.json` is written by the platform and holds only `env` and `release`.
+- Auth checks in the API return `401` JSON rather than redirecting, which is the right behavior for a JSON API.
+- Authorization (who may do what) is the app's job, in its own tables. Being signed in isn't permission.
+- With a custom domain (5.10), the provider may need the hostname too, as a redirect URL or allowed origin.
 
 **Database credentials**
 
@@ -280,7 +271,6 @@ secrets:                   # names only; values are set with /secret (see 5.8)
   - OPENAI_API_KEY
 
 # Platform-owned (dev team approval required to change)
-auth: clerk
 auto_merge: true
 sizes:
   staging: small
@@ -312,7 +302,7 @@ The ECR repository is shared by both environments, so promotion deploys the exac
 **One environment contains:**
 
 - **RDS Postgres**: single instance in private subnets of the shared VPC, with the master password managed by RDS in Secrets Manager (`manage_master_user_password = true`). Prod adds deletion protection, 14-day backups and a final snapshot on delete.
-- **ECS Express Mode service**: created with `aws_ecs_express_gateway_service` (AWS provider ≥ 6.23). Express Mode provides the Fargate service, a load balancer with TLS, auto scaling and a public `*.ecs.ca-west-1.on.aws` URL. Services sharing a network configuration share a load balancer. ECS keeps deleted service names reserved, so service names get a short random suffix. A separate `migrate` task definition, using the same image and database access, runs migrations as a one-off task (see 5.9). Environment variables: `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_SECRET_ARN`, `CLERK_PUBLISHABLE_KEY`. Secrets injected by ECS: `CLERK_SECRET_KEY` from that environment's shared Clerk secret, plus every app secret declared in `app.yaml` (see 5.8).
+- **ECS Express Mode service**: created with `aws_ecs_express_gateway_service` (AWS provider ≥ 6.23). Express Mode provides the Fargate service, a load balancer with TLS, auto scaling and a public `*.ecs.ca-west-1.on.aws` URL. Services sharing a network configuration share a load balancer. ECS keeps deleted service names reserved, so service names get a short random suffix. A separate `migrate` task definition, using the same image and database access, runs migrations as a one-off task (see 5.9). Environment variables: `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_SECRET_ARN`. Secrets injected by ECS: every app secret declared in `app.yaml` (see 5.8).
 - **S3 bucket**: private, holds the frontend build and `config.json`, readable only by CloudFront through origin access control.
 - **CloudFront distribution** with these behaviors:
 
@@ -327,10 +317,10 @@ Routing the API through CloudFront puts the frontend and API on one domain, so t
 `config.json` is written by `deploy-env` on every deploy:
 
 ```json
-{ "clerkPublishableKey": "pk_test_...", "env": "staging", "release": "a1b2c3d" }
+{ "env": "staging", "release": "a1b2c3d" }
 ```
 
-**Both environments start empty.** Each gets its own new RDS instance, and the first deploy's migrations create the schema. No data is ever copied between environments. App users sign in through Clerk; their local `users` rows are created on first visit to each environment.
+**Both environments start empty.** Each gets its own new RDS instance, and the first deploy's migrations create the schema. No data is ever copied between environments.
 
 **Naming and tagging**
 
@@ -346,7 +336,6 @@ Created once by the dev team from `foundation/`, all in `ca-west-1` except where
 - **Release artifacts bucket** for frontend builds (`releases/<app>/<sha>/web.tgz`).
 - **CodeBuild projects** `build-release` and `deploy-env` and their IAM roles.
 - **GitHub App** (`slipway-deployer`), installed on all repos in the org.
-- **Clerk applications and secrets** (see below).
 - **KMS key** `alias/slipway-secrets`, used to encrypt app secrets in Parameter Store (see 5.8).
 - **The deployer**: EC2 instance, its IAM role, its CloudFront distribution and VPC origin, and the Litestream backup bucket.
 
@@ -355,31 +344,6 @@ CloudFront is a global service; its distributions serve from edge locations worl
 **Region availability check (rollout step 1)**
 
 `ca-west-1` is a newer region. Before building, confirm in the console or docs that each of these is available there: ECS Express Mode and Fargate (including ARM/Graviton), `t4g` EC2 instances, `db.t4g` RDS instances (not offered for Postgres in `ca-west-1`; the presets use `db.t3`, see 5.2), and the CodeBuild compute types we use. CloudFront VPC origins are supported in `ca-west-1`. The design does not depend on AWS CodeConnections; CodeBuild reads source from S3 instead (see 5.6).
-
-**Clerk setup**
-
-Clerk production instances must be tied to a domain we own, and Clerk's production keys can't be used on a host-provided domain. Our CloudFront URLs fall in that category. So until we add custom domains, **staging and prod both run on Clerk development instances.** That works for internal tools, with limits (see Risks):
-
-- Development instances are capped at **100 users**.
-- Clerk's sign-in UI shows a development-mode notice, and Clerk's emails carry a "development" prefix.
-- Clerk describes development instances as having a more relaxed security posture than production ones.
-
-To keep `/new-app` free of any Clerk setup, all apps share three Clerk applications, created once by the dev team:
-
-| Clerk application | Instance used | Used by | Where keys live |
-|---|---|---|---|
-| `slipway-local` | Development | `localhost` on colleagues' laptops | Deployer, handed out by `GET /api/dev-config` |
-| `slipway-stage` | Development | Every app's staging | Secrets Manager `slipway/clerk/stage` (publishable and secret key) |
-| `slipway-production` | Development (until domains) | Every app's prod | Secrets Manager `slipway/clerk/production` (publishable and secret key) |
-
-Configuration for each Clerk application:
-
-- Sign-in with Google and email, restricted with Clerk's allowlist (your email domain, or a list of addresses).
-- Sign-up open to anyone the allowlist admits, so colleagues can use any app immediately.
-
-Sharing an application per environment means one sign-in works across every app in that environment, and adding an app needs no Clerk changes. The trade-offs are that the 100-user cap and the Backend API rate limit are shared by all apps in that environment, and any colleague can sign in to any app. Apps must do their own authorization.
-
-When we add custom domains (`*.apps.example.com`), move `slipway-production` to a production instance on that domain. Clerk's Platform API, which can create Clerk applications programmatically, is in private beta; if we get access, per-app Clerk applications become an option.
 
 ### 5.5 Deployer
 
@@ -578,7 +542,6 @@ The plugin sends the colleague's `gh auth token`. The deployer checks it with Gi
 | Method and path | Who | Purpose |
 |---|---|---|
 | `POST /webhooks/github` | GitHub | Push and PR events |
-| `GET /api/dev-config` | Plugin | Local-development Clerk keys for `.env` |
 | `POST /api/apps` | Plugin | Register a new app |
 | `GET /api/apps/:name` | Plugin | Status, releases, URLs |
 | `GET /api/apps/:name/pulls/:number` | Plugin | PR check, merge and deploy state for `/ship` |
@@ -623,7 +586,7 @@ Inputs: `APP`, `ENV` (`shared`, `staging`, `prod`), `IMAGE_DIGEST`, `WEB_ARTIFAC
 2. **Phase 1:** `terraform init` with the state key `apps/<APP>/<ENV>.tfstate`, then `terraform apply` with `migrate_image` set to the new release and `service_image` left at the release currently running. This creates or updates everything except the running service. On an environment's first deploy, the service isn't created yet.
 3. **Migrate:** run the `migrate` task and wait for it to exit (see 5.9). If it fails, stop here: the service is still running the previous release against an unchanged database.
 4. **Phase 2:** `terraform apply` with `service_image` set to the new release, and wait for the ECS deployment to become stable.
-5. Sync the frontend artifact to the environment's S3 bucket and write `config.json` with the environment's Clerk publishable key, then invalidate CloudFront. The frontend goes last so it never calls API endpoints that aren't live yet.
+5. Sync the frontend artifact to the environment's S3 bucket and write `config.json` (the environment's name and the release), then invalidate CloudFront. The frontend goes last so it never calls API endpoints that aren't live yet.
 6. Call `/api/health` through the CloudFront URL until it succeeds or times out.
 7. Export the CloudFront URL for the deployer.
 
@@ -648,7 +611,7 @@ Because the deployer sets these through the GitHub App, they apply the same way 
 
 ### 5.8 App secrets
 
-Apps often need their own secrets, such as a Stripe or OpenAI API key. These are separate from the platform-managed secrets (the database password and the Clerk secret key), which stay in Secrets Manager.
+Apps often need their own secrets, such as a Stripe or OpenAI API key. These are separate from the platform-managed secrets (the database password), which stay in Secrets Manager.
 
 **Storage**
 
@@ -752,7 +715,7 @@ Any dashboard user can add or remove domains, like promoting. Apps need no chang
 
 1. Plugin creates the repo and calls `POST /api/apps`.
 2. Deployer records the app (`registering`), sets branch protection, and queues: `deploy-env shared`, then `build-release`, then `deploy-env staging`.
-3. When staging is healthy, the app becomes `active` and the plugin prints the URL. Staging's database is empty apart from the schema; sign-in works through the shared staging Clerk application.
+3. When staging is healthy, the app becomes `active` and the plugin prints the URL. Staging's database is empty apart from the schema.
 4. Prod is created, also empty, the first time someone promotes.
 
 **Ship a change**
@@ -771,7 +734,7 @@ Any dashboard user can add or remove domains, like promoting. Apps need no chang
 **Promote to prod**
 
 1. Any signed-in dashboard user presses Promote. If prod is missing a declared secret, the deploy fails before changing anything and lists the missing names.
-2. Deployer queues `deploy-env prod` with staging's current release: same image digest, same frontend build. Nothing is rebuilt; only `config.json` differs, pointing at the prod Clerk application. The job records who promoted.
+2. Deployer queues `deploy-env prod` with staging's current release: same image digest, same frontend build. Nothing is rebuilt; only `config.json` differs, naming the environment. The job records who promoted.
 
 **Rollback**
 
@@ -782,21 +745,21 @@ Any signed-in user picks an earlier release that succeeded and deploys it to sta
 1. The owner runs `/destroy-app`, which creates a destroy request.
 2. A dashboard user confirms it by typing the app name.
 3. Deployer runs `deploy-env` with `ACTION=destroy` for prod, staging, then shared. Prod's RDS takes a final snapshot.
-4. The repo is archived. Clerk needs no cleanup, since apps share the Clerk applications.
+4. The repo is archived.
 
 ## 7. Security model
 
 | Identity | Can do | Cannot do |
 |---|---|---|
-| Colleague / their Claude Code | Push branches, open PRs in their app repo | Push to `main`, change deploy logic, access AWS, see staging or prod Clerk secrets |
-| App user (via Clerk) | Sign in to any app in an environment with an email Clerk allows | Anything the app's own authorization doesn't allow |
+| Colleague / their Claude Code | Push branches, open PRs in their app repo | Push to `main`, change deploy logic, access AWS, see staging or prod secret values |
+| App user | Open any app they have the link to (apps are public until their developer adds sign-in) | Anything the app's own authorization, once it has some, doesn't allow |
 | Dashboard user | Promote, roll back, confirm teardown | Change infrastructure or build steps |
 | Dashboard admin | Everything a user can, plus manage accounts | Same as above |
 | Deployer GitHub App | Download source, merge PRs with a passing check, set branch protection, post statuses and comments | Bypass its own check logic (enforced by code review of the deployer) |
 | Deployer instance role | Upload to the sources bucket, start and read `build-release` and `deploy-env` builds, read its own secrets, write to the Litestream bucket, write (not read) app secrets | Create or change any app infrastructure, read app secret values |
 | `build-release` role | Read the sources bucket, pull and push to `app-*` ECR repos, write to the releases bucket | Touch RDS, ECS, CloudFront, IAM; access GitHub |
-| `deploy-env` role | Manage resources named or tagged `app-*`, create IAM roles only with the `slipway-boundary` permissions boundary, read and write Terraform state, read Clerk publishable keys from SSM | Touch anything outside the `app-*` scope, create roles without the boundary |
-| App task execution role | Fetch its own app secrets and its environment's Clerk secret at task start | Read any other app's or environment's secrets |
+| `deploy-env` role | Manage resources named or tagged `app-*`, create IAM roles only with the `slipway-boundary` permissions boundary, read and write Terraform state | Touch anything outside the `app-*` scope, create roles without the boundary |
+| App task execution role | Fetch its own app secrets at task start | Read any other app's or environment's secrets |
 | App task role | Read its own DB secret; whatever else the app needs, within the boundary | Escalate beyond the boundary |
 
 Key points:
@@ -804,14 +767,14 @@ Key points:
 - No long-lived AWS keys exist anywhere: not on laptops, not in repos.
 - The deployer, the most exposed component, holds the least AWS power. Compromising it lets an attacker deploy code that's already on `main`, not run arbitrary commands with deploy permissions.
 - Buildspecs and Terraform come only from `sameid/slipway`, which only the dev team can change.
-- **Shared Clerk secrets:** every app in an environment holds that environment's Clerk secret key, which can manage all of that environment's Clerk users. A compromised app could misuse it. This is acceptable for internal tools on a shared user pool, and goes away if we move to per-app Clerk applications.
+- **Apps are public by default:** a new app has no sign-in, so whatever it stores or shows is open to anyone with its link until its developer adds authentication. The template's `CLAUDE.md` and the `slipway-stack` skill tell the agent so, and to ask before building anything per-user.
 - **The v1 trade-off:** with auto-merge and everyone able to promote, the only things standing between agent-written code and prod are the automated checks and a person choosing to press Promote. That is a deliberate choice for speed. It's acceptable while apps are internal tools; tighten it (required reviews, or promotion limited to admins) before any app handles customer data or sensitive internal data.
 
 ## 8. Operations
 
 - **Backups**: Litestream for the deployer; RDS automated backups for every app (7 days staging, 14 days prod).
 - **Deployer recovery**: `terraform apply` the deployer stack, then `litestream restore`. Target: under 30 minutes. Apps keep running the whole time; only merges and deploys pause. Catch-up on startup queues anything missed.
-- **Monitoring**: CloudWatch alarms on deployer instance health, failed deploy count, and RDS free storage. A failed prod deploy notifies the dev team channel. A weekly check of each Clerk application's user count warns at 80 users.
+- **Monitoring**: CloudWatch alarms on deployer instance health, failed deploy count, and RDS free storage. A failed prod deploy notifies the dev team channel.
 - **Patching**: Amazon Linux automatic security updates on the deployer, monthly `npm audit` and dependency updates for the deployer and the template. RDS minor version upgrades in a weekly maintenance window.
 - **Cost controls**: monthly report of every active app's cost by `app` tag. Apps with no merges in 60 days get flagged to their owner for teardown. AWS Budgets alarm on the total.
 
@@ -823,17 +786,14 @@ Platform overhead is small:
 
 - **Deployer**: one `t4g.small`, its EBS volume, and a CloudFront distribution.
 - **CodeBuild**: billed per build minute. The smallest Linux machine is $0.005/minute in US East, with 100 free minutes per month; check the `ca-west-1` rate. Auto-merge adds a `check` build to every PR, so budget for roughly one check plus one release per merge. At 20 apps × 10 merges a month × ~18 minutes per merge, that's on the order of $18/month on small machines. Docker builds may need a larger machine, which costs more per minute.
-- **Clerk**: three shared applications. Confirm the plan and pricing with Clerk, especially for the production instance we'll need once domains arrive.
 
 ## 10. Risks
 
 | Risk | Mitigation |
 |---|---|
 | Broken or unsafe code auto-merges to staging | Checks must pass (type check, lint, tests, build); staging soaks before anyone promotes; rollback is one click |
+| An app stores something private before it has sign-in | `CLAUDE.md` and the `slipway-stack` skill tell the agent every route is public and to ask before building anything per-user; adding auth is the developer's call |
 | Weak tests let bad code through | Template ships with example tests and the `slipway-stack` skill tells the agent to add tests with every feature |
-| Clerk's 100-user cap on development instances is hit, blocking sign-ups across all apps in that environment | User-count alarm at 80; the fix is custom domains plus a Clerk production instance for prod, so plan domains before broad rollout if more than ~80 colleagues will use the apps |
-| Clerk development-mode notices confuse users | Tell pilot users to expect them; they disappear with the production instance |
-| Clerk Backend API rate limit shared across apps | Template verifies sessions locally and caches user details in its own `users` table instead of calling Clerk per request |
 | A required service isn't available in `ca-west-1` | Availability check is rollout step 1, before any building |
 | Deployer instance fails | Apps unaffected; rebuild from Terraform and Litestream; catch-up on startup |
 | Dashboard account compromised | Argon2 hashes, rate-limited login, short sessions, admins can disable accounts; every promote is logged with the user |
@@ -850,28 +810,25 @@ Platform overhead is small:
 ## 11. Rollout plan
 
 1. **Region check and foundation**: confirm service availability in `ca-west-1`, then build the VPC, the state, sources and artifact buckets, and both CodeBuild projects and their roles.
-2. **Clerk**: create the three Clerk applications, restrict who can sign in, and store their keys in Secrets Manager and SSM.
-3. **Template and one app by hand**: the `react-express` template with Clerk, the per-app Terraform module and buildspecs. Upload a source zip and start `build-release` and `deploy-env` manually to get one app to staging and prod, and sign in on both.
-4. **Deployer core**: Express server, SQLite with Drizzle, GitHub App, webhooks, worker loop, Litestream, systemd units. Merges deploy staging automatically.
-5. **Auto-merge**: `check` builds on PRs, branch protection on registration, merge on success.
-6. **Dashboard**: local accounts and the admin bootstrap script, app list, Promote, Rollback, Users page.
-7. **Plugin and secrets**: `/new-app`, `/ship`, `/status`, `/secret`, hooks, the `slipway-stack` and `coding-agent` skills, `/api/dev-config`, one-time secret links. Pilot with two or three colleagues.
-8. **Teardown and cost controls**: `/destroy-app`, idle-app report, budgets, Clerk user-count check.
+2. **Template and one app by hand**: the `react-express` template, the per-app Terraform module and buildspecs. Upload a source zip and start `build-release` and `deploy-env` manually to get one app to staging and prod.
+3. **Deployer core**: Express server, SQLite with Drizzle, GitHub App, webhooks, worker loop, Litestream, systemd units. Merges deploy staging automatically.
+4. **Auto-merge**: `check` builds on PRs, branch protection on registration, merge on success.
+5. **Dashboard**: local accounts and the admin bootstrap script, app list, Promote, Rollback, Users page.
+6. **Plugin and secrets**: `/new-app`, `/ship`, `/status`, `/secret`, hooks, the `slipway-stack` and `coding-agent` skills, one-time secret links. Pilot with two or three colleagues.
+7. **Teardown and cost controls**: `/destroy-app`, idle-app report, budgets.
 
-Steps 1–3 prove the infrastructure and sign-in before any deployer code is written.
+Steps 1–2 prove the infrastructure before any deployer code is written.
 
 ## 12. Open questions
 
-- How many colleagues are likely to use apps in the first few months? Above ~80, a shared apps domain and a Clerk production instance move up the priority list.
-- When do we give apps a shared domain (`*.apps.example.com`)? Per-app custom domains (5.10) exist; a shared one would also allow a Clerk production instance.
+- When do we give apps a shared domain (`*.apps.example.com`)? Per-app custom domains (5.10) exist, but need someone who owns a domain.
 - When do we add Google sign-in to the deployer dashboard?
 - What signals mean an app should move off auto-merge or admin-only promotion (customer data, external users)?
 
 ## 13. Future work
 
-- A shared apps domain with a wildcard certificate (ACM in `us-east-1` for CloudFront), and a Clerk production instance for prod.
+- A shared apps domain with a wildcard certificate (ACM in `us-east-1` for CloudFront), so every app gets a readable address.
 - Buying domains through the deployer, and more than one hostname per environment (e.g. `www` and the root domain).
-- Per-app Clerk applications if Clerk's Platform API becomes available to us.
 - Google sign-in for the deployer dashboard.
 - Required reviews or AI review on PRs for apps that need them.
 - Per-PR preview environments.
