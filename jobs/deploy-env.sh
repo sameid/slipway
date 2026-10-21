@@ -106,31 +106,93 @@ delete_secret_parameters() {
 # minutes. aws_ecs_express_gateway_service has no arguments for any of it, but
 # Express Mode leaves these editable on the ECS service and its target groups
 # (only the CANARY strategy itself is fixed), so they're set there. Staging
-# skips the waits; prod keeps short ones so the rollback alarm can still stop a
-# bad release.
+# skips the waits. Prod keeps a one-minute canary: shorter than the two bad
+# minutes the rollback alarm needs, so a release that fails its health checks or
+# keeps crashing is still stopped (the circuit breaker), but one that starts and
+# then answers with errors mostly isn't. Each minute here is a minute of every
+# prod deploy.
 HEALTH_CHECK_INTERVAL=10
 HEALTHY_THRESHOLD=2
+
+# Express Mode's rollback alarm counts 4XX answers as errors once there are 5 in
+# a minute, so on a quiet app one visitor getting 401s (signed out) or 404s
+# rolls back a good release. The service is pointed at a copy that counts 5XX
+# only, with the same metrics, threshold and periods.
+# Express Mode tags its own alarm AmazonECSManaged, so that one is left as it is
+# and the copy belongs to the platform (deleted with the environment). Anything
+# but the formula Express Mode used when this was written is left alone.
+server_error_alarm_name() { echo "$1/$2/ServerErrorRollbackAlarm"; } # cluster service
+SERVER_ERROR_ALARM=""
+set_server_error_alarm() { # cluster service; sets SERVER_ERROR_ALARM
+  local express="$1/$2/RollbackAlarm" ours want current
+  ours=$(server_error_alarm_name "$1" "$2")
+  SERVER_ERROR_ALARM=""
+  want=$(aws cloudwatch describe-alarms --alarm-names "$express" --query 'MetricAlarms[0]' --output json) || return 1
+  want=$(jq -c --arg name "$ours" '
+    def rate: .Id | test("^em[0-9]+$");
+    def express_formula: (.Id[1:]) as $m
+      | "100 * (IF(\($m)_4xx < 5, 0, \($m)_4xx) + \($m)_5xx) / FILL(\($m)_total, 1)";
+    if . == null or ([.Metrics[]? | select(rate)] | length) == 0
+      or any(.Metrics[] | select(rate); .Expression != express_formula) then empty
+    else {
+      AlarmName: $name,
+      AlarmDescription: "Rate of 5XX errors (slipway: 4XX answers, such as 401s and 404s, are not a failed release)",
+      ActionsEnabled, EvaluationPeriods, DatapointsToAlarm, Threshold, ComparisonOperator, TreatMissingData,
+      Metrics: [.Metrics[] | select(.Id | endswith("_4xx") | not)
+        | if rate then (.Id[1:]) as $m
+            | .Expression = "100 * \($m)_5xx / FILL(\($m)_total, 1)" | .Label = "5XX errors percentage, \(.Label | sub("^.* for "; ""))"
+          else . end]
+    } end' <<<"$want") || return 1
+  if [[ -z "$want" ]]; then
+    echo "rollback alarm: $express isn't in the shape this expects; the service keeps its alarms"
+    return 0
+  fi
+  current=$(aws cloudwatch describe-alarms --alarm-names "$ours" --output json \
+    --query 'MetricAlarms[0].{AlarmName: AlarmName, AlarmDescription: AlarmDescription, ActionsEnabled: ActionsEnabled, EvaluationPeriods: EvaluationPeriods, DatapointsToAlarm: DatapointsToAlarm, Threshold: Threshold, ComparisonOperator: ComparisonOperator, TreatMissingData: TreatMissingData, Metrics: Metrics}') ||
+    return 1
+  if [[ "$(jq -cS . <<<"$current")" != "$(jq -cS . <<<"$want")" ]]; then
+    # Tags only apply when the alarm is created.
+    aws cloudwatch put-metric-alarm --cli-input-json "$(jq -c --arg app "$APP" --arg env "$ENV" \
+      '. + {Tags: [{Key: "app", Value: $app}, {Key: "env", Value: $env}, {Key: "platform", Value: "slipway"}]}' <<<"$want")" ||
+      return 1
+  fi
+  SERVER_ERROR_ALARM=$ours
+}
 
 # Prints each setting as it was, and what it changed. Stops at the first failed
 # call (set -e doesn't apply here: rollout_settings calls it from ||).
 set_rollout_settings() { # cluster service
-  local cluster=$1 service=$2 canary=2 final=1 config want was raw tg interval healthy
+  local cluster=$1 service=$2 canary=1 final=0 config want was raw tg interval healthy
   [[ "$ENV" != staging ]] || { canary=0 final=0; }
   config=$(aws ecs describe-services --cluster "$cluster" --services "$service" \
     --query 'services[0].deploymentConfiguration' --output json) || return 1
+  want=$config
   if [[ "$(jq -r .strategy <<<"$config")" != CANARY ]]; then
     echo "rollout waits: $service doesn't roll out as a canary; left alone"
   else
     want=$(jq -c --argjson canary "$canary" --argjson final "$final" \
-      '.canaryConfiguration.canaryBakeTimeInMinutes = $canary | .bakeTimeInMinutes = $final' <<<"$config") || return 1
+      '.canaryConfiguration.canaryBakeTimeInMinutes = $canary | .bakeTimeInMinutes = $final' <<<"$want") || return 1
     was=$(jq -r '"canary \(.canaryConfiguration.canaryBakeTimeInMinutes)m, then \(.bakeTimeInMinutes)m"' <<<"$config") || return 1
-    if [[ "$(jq -cS . <<<"$config")" == "$(jq -cS . <<<"$want")" ]]; then
+    if [[ "$was" == "canary ${canary}m, then ${final}m" ]]; then
       echo "rollout waits: $was (already set)"
     else
-      aws ecs update-service --cluster "$cluster" --service "$service" --deployment-configuration "$want" \
-        --query 'service.serviceName' --output text >/dev/null || return 1
       echo "rollout waits: $was -> canary ${canary}m, then ${final}m"
     fi
+  fi
+
+  set_server_error_alarm "$cluster" "$service" || return 1
+  if [[ -n "$SERVER_ERROR_ALARM" ]]; then
+    was=$(jq -r '.alarms.alarmNames // [] | join(", ")' <<<"$config") || return 1
+    want=$(jq -c --arg alarm "$SERVER_ERROR_ALARM" '.alarms.alarmNames = [$alarm]' <<<"$want") || return 1
+    if [[ "$was" == "$SERVER_ERROR_ALARM" ]]; then
+      echo "rollback alarm: 5XX errors only (already set)"
+    else
+      echo "rollback alarm: ${was:-none} -> $SERVER_ERROR_ALARM (5XX errors only)"
+    fi
+  fi
+  if [[ "$(jq -cS . <<<"$config")" != "$(jq -cS . <<<"$want")" ]]; then
+    aws ecs update-service --cluster "$cluster" --service "$service" --deployment-configuration "$want" \
+      --query 'service.serviceName' --output text >/dev/null || return 1
   fi
 
   # The service's revision names both of its target groups: each rollout moves
@@ -162,7 +224,20 @@ set_rollout_settings() { # cluster service
 # Best effort: a deploy with Express Mode's defaults is only slower.
 rollout_settings() { # cluster service
   set_rollout_settings "$@" ||
-    echo "warning: couldn't set the rollout waits and health checks ($(aws --version 2>&1 | cut -d' ' -f1)); this rollout uses Express Mode's defaults"
+    echo "warning: couldn't set the rollout waits, rollback alarm and health checks ($(aws --version 2>&1 | cut -d' ' -f1)); this rollout uses Express Mode's defaults"
+}
+
+# What the service's primary deployment runs, as "image release deploy-id", or
+# nothing. A failed rollout leaves the last apply's outputs naming what it tried
+# to run while ECS rolled the service back; phase 1 passing those would roll the
+# service out again before the migration.
+running_service() { # cluster service
+  local task_definition
+  task_definition=$(aws ecs describe-services --cluster "$1" --services "$2" \
+    --query 'services[0].deployments[?status==`PRIMARY`].taskDefinition | [0]' --output text) || return 1
+  [[ "$task_definition" == arn:* ]] || return 1
+  aws ecs describe-task-definition --task-definition "$task_definition" --output text \
+    --query 'taskDefinition.containerDefinitions[?environment[?name==`DEPLOY_ID`]] | [0].[image, environment[?name==`RELEASE`].value | [0], environment[?name==`DEPLOY_ID`].value | [0]]'
 }
 
 step install
@@ -223,6 +298,16 @@ if [[ "$ACTION" == destroy ]]; then
       tf_apply "${current[@]}" -var destroying=true
     fi
     tf_destroy "${current[@]}" -var destroying=true
+  fi
+  step delete-alarms
+  # The rollback alarm copies the platform made (set_server_error_alarm);
+  # Express Mode deletes its own with the service.
+  mapfile -t alarms < <(aws cloudwatch describe-alarms --alarm-name-prefix "app-$APP-$ENV/" \
+    --query "MetricAlarms[?ends_with(AlarmName, '/ServerErrorRollbackAlarm')].AlarmName" --output text |
+    tr '\t' '\n' | sed '/^$/d;/^None$/d')
+  if ((${#alarms[@]})); then
+    aws cloudwatch delete-alarms --alarm-names "${alarms[@]}"
+    printf 'deleted %s\n' "${alarms[@]}"
   fi
   step delete-secrets
   delete_secret_parameters
@@ -292,6 +377,19 @@ tf_init
 CURRENT_IMAGE=$(tf_out service_image)
 CURRENT_RELEASE=$(tf_out release)
 CURRENT_DEPLOY_ID=$(tf_out deploy_id)
+CURRENT_SERVICE=$(tf_out service_name)
+if [[ -n "$CURRENT_SERVICE" ]]; then
+  CURRENT_CLUSTER=$(tf_req cluster_name)
+  if read -r image release deploy_id < <(running_service "$CURRENT_CLUSTER" "$CURRENT_SERVICE") &&
+    [[ "$image" == *@sha256:* && "$deploy_id" =~ ^[0-9]+$ && -n "$release" && "$release" != None ]]; then
+    if [[ "$deploy_id" != "$CURRENT_DEPLOY_ID" ]]; then
+      echo "the last deploy ($CURRENT_DEPLOY_ID) didn't finish: the service still runs deploy $deploy_id, which phase 1 keeps"
+    fi
+    CURRENT_IMAGE=$image CURRENT_RELEASE=$release CURRENT_DEPLOY_ID=$deploy_id
+  else
+    echo "warning: couldn't read what $CURRENT_SERVICE runs; phase 1 uses the last apply's outputs"
+  fi
+fi
 echo "service currently runs: ${CURRENT_RELEASE:-nothing (first deploy)}; deploying $SHORT"
 apply_env \
   -var "service_image=$CURRENT_IMAGE" \

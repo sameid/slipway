@@ -479,6 +479,7 @@ export class Worker {
     if (job.kind === "check" || job.kind === "build") {
       const sha = job.commitSha;
       if (!sha) throw new Error("job has no commit");
+      const checked = job.kind === "build" ? await this.passedCheckOfSameCode(app, sha) : undefined;
       // The deployer holds the GitHub App; the runner never sees a GitHub credential.
       return runs.start({
         kind: "build-release",
@@ -488,6 +489,7 @@ export class Worker {
           COMMIT_SHA: sha,
           MODE: job.kind === "check" ? "check" : "release",
           ...(job.kind === "check" ? { PR_NUMBER: String(job.prNumber) } : {}),
+          ...(checked ? { VERIFIED_BY_CHECK: String(checked.id) } : {}),
         },
       });
     }
@@ -512,6 +514,36 @@ export class Worker {
       return runId;
     }
     return runs.start({ kind: "deploy-env", env });
+  }
+
+  /**
+   * A recent passed check of exactly this code, if there is one. Squash-merging
+   * a PR that was up to date with main gives a commit with the same Git tree as
+   * the head its check passed, so the release build needn't run the same type
+   * check, lint and tests again (build-release.sh). Anything uncertain, such as
+   * GitHub failing to answer, means a full build.
+   */
+  private async passedCheckOfSameCode(app: AppRow, sha: string): Promise<JobRow | undefined> {
+    const checks = this.deps.db
+      .select()
+      .from(jobs)
+      .where(and(eq(jobs.app, app.name), eq(jobs.kind, "check"), eq(jobs.status, "succeeded")))
+      .orderBy(desc(jobs.id))
+      .limit(5)
+      .all();
+    if (!checks.length) return undefined;
+    try {
+      const tree = await this.deps.github.treeOf(app.repo, sha);
+      for (const check of checks) {
+        if (check.commitSha && (await this.deps.github.treeOf(app.repo, check.commitSha)) === tree) return check;
+      }
+    } catch (err) {
+      this.deps.log("couldn't compare the build with recent checks; building in full", {
+        app: app.name,
+        error: String(err),
+      });
+    }
+    return undefined;
   }
 }
 

@@ -13,6 +13,8 @@
 #                         upload web.tgz and app.yaml to releases/<app>/<sha>/
 #
 # Inputs (env): APP, COMMIT_SHA, MODE (release | check), PR_NUMBER (check only),
+#   VERIFIED_BY_CHECK (release only: the id of a passed check of the same Git
+#   tree; verify then skips what that check already ran on this exact code),
 #   SLIPWAY_WORK, SLIPWAY_IMAGE (local tag), SLIPWAY_SOURCE_ZIP (prepare),
 #   RELEASES_BUCKET and AWS_ACCOUNT_ID (publish), SLIPWAY_SHARE_WORK=1 when the
 #   verify phase runs as a separate build user.
@@ -33,6 +35,9 @@ case "$MODE" in
   *) die "MODE must be release or check, not '$MODE'" ;;
 esac
 [[ "$APP" =~ ^[a-z][a-z0-9-]{1,18}[a-z0-9]$ ]] || die "invalid APP '$APP'"
+if [[ -n "${VERIFIED_BY_CHECK:-}" ]]; then
+  [[ "$MODE" == release && "$VERIFIED_BY_CHECK" =~ ^[0-9]+$ ]] || die "VERIFIED_BY_CHECK is a check's job id, for release mode only"
+fi
 SRC="$SLIPWAY_WORK/src"
 IMAGE="${SLIPWAY_IMAGE:-slipway-local/app-$APP:${COMMIT_SHA:0:12}}"
 
@@ -47,7 +52,7 @@ case "$PHASE" in
   prepare)
     require_env SLIPWAY_SOURCE_ZIP
     reset_exports
-    echo "app $APP, commit $COMMIT_SHA, mode $MODE${PR_NUMBER:+, PR #$PR_NUMBER}"
+    echo "app $APP, commit $COMMIT_SHA, mode $MODE${PR_NUMBER:+, PR #$PR_NUMBER}${VERIFIED_BY_CHECK:+, same code as check #$VERIFIED_BY_CHECK}"
     step prepare
     require_tools unzip node
     rm -rf "$SRC" "$SLIPWAY_WORK/unpack"
@@ -104,17 +109,25 @@ case "$PHASE" in
     step npm-ci
     npm ci --no-audit --no-fund
 
-    step typecheck
-    npm run typecheck
+    if [[ -n "${VERIFIED_BY_CHECK:-}" ]]; then
+      # The deployer found that check #N passed a commit with this exact Git
+      # tree (a squash merge of an up-to-date PR), so these would only repeat
+      # it. The secret scan above is cheap and stays.
+      step verified
+      echo "type check, lint, tests and migrations check skipped: check #$VERIFIED_BY_CHECK passed this exact code"
+    else
+      step typecheck
+      npm run typecheck
 
-    step lint
-    npm run lint
+      step lint
+      npm run lint
 
-    step test
-    npm test
+      step test
+      npm test
 
-    step migrations-check
-    npm run db:check -w api
+      step migrations-check
+      npm run db:check -w api
+    fi
 
     step web-build
     bash -c "$BUILD_COMMAND"

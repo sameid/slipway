@@ -256,6 +256,12 @@ export class FakeGitHub implements GitHub {
     return pull && pull.baseMain !== r.main ? 1 : 0;
   }
 
+  async treeOf(repo: string, sha: string): Promise<string> {
+    const c = this.must(repo).commits.get(sha);
+    if (!c) throw Object.assign(new Error("Not Found"), { status: 404 });
+    return sha1(JSON.stringify(Object.entries(c.files).sort(([a], [b]) => a.localeCompare(b))));
+  }
+
   async updateBranch(repo: string, number: number, expectedHeadSha: string): Promise<"updated" | "conflict"> {
     const r = this.must(repo);
     const pull = this.mustPull(r, number);
