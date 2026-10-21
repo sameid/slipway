@@ -265,6 +265,14 @@ describe("against a mock deployer", () => {
     assert.match(r.stdout, /needs a review from CODEOWNERS/);
   });
 
+  test("wait-pr --max-seconds 0 looks once without waiting", async () => {
+    state.pull = () => ({ json: { number: 5, headSha: "abc", status: "checking", check: job({ kind: "check", env: "check", status: "running" }), live: false, note: null } });
+    const r = await runCli(["wait-pr", "5", "--max-seconds", "0"], { cwd: repo, env: env() });
+    assert.equal(r.code, 10);
+    assert.match(r.stdout, /Check running/);
+    assert.match(r.stdout, /Still in progress/);
+  });
+
   test("status prints both environments", async () => {
     state.apps = { "loan-tracker": app() };
     const r = await runCli(["status", "--app", "loan-tracker"], { env: env() });

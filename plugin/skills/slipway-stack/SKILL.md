@@ -51,5 +51,5 @@ These apps run on the slipway platform. Every merge to `main` deploys to staging
 
 ## No local running
 
-- Apps don't run on the laptop: there's no local database, dev server or `.env`. Check work with tests, typecheck and lint, and the user previews it on staging after `/ship` merges it.
+- Apps don't run on the laptop: there's no local database, dev server or `.env`. Check work with tests, typecheck and lint, and the user previews it on staging once the PR `/ship` opened has merged.
 - Work on features in a worktree (the `coding-agent` skill), and finish with `/ship`.

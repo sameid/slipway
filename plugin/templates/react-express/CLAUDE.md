@@ -7,8 +7,8 @@ An app on the slipway platform: React, TanStack Query, HeroUI and Tailwind (Vite
 ## How to work
 
 - Every feature, fix or enhancement gets its own git worktree and branch (the `coding-agent` skill sets this up). Never work in the main checkout; it stays on `main`.
-- Finish with `/ship`. It commits, rebases onto `main`, opens or updates the PR, and waits for the check, the auto-merge and the staging deploy. Never push to `main`.
-- There's no local database and the app isn't run locally. Check your work with tests, typecheck and lint; the user previews it on staging once `/ship` has merged it.
+- Finish with `/ship`. It commits, rebases onto `main`, opens or updates the PR and tells the user it's submitted, without waiting; the deployer merges it once its check passes and deploys staging. Never push to `main`.
+- There's no local database and the app isn't run locally. Check your work with tests, typecheck and lint; the user previews it on staging once the PR has merged.
 - Add or update tests with every change (Vitest: see `api/src/app.test.ts` and `web/src/App.test.tsx`). Tests never touch a database: mock `./db/client.js` the way `api/src/app.test.ts` does.
 - Before shipping, run `npm run typecheck`, `npm run lint` and `npm test`, plus `npm run db:check -w api` if the schema changed. The PR check runs the same commands, a secret scan, the Docker build and the frontend build. A failing check blocks the merge.
 

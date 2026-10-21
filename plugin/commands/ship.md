@@ -1,10 +1,10 @@
 ---
-description: Commit this worktree's task, rebase onto main, open or update its PR, and wait until it's merged and live on staging
+description: Commit this worktree's task, rebase onto main, and open or update its PR; the deployer merges it and updates staging on its own
 argument-hint: "[short description of the change]"
 allowed-tools: Bash(slipway *), Bash(${CLAUDE_PLUGIN_ROOT}/bin/slipway *), Bash(git *), Bash(gh pr *), Bash(npm run *), Bash(npm test *)
 ---
 
-Ship the current task to staging. Run this from inside the task's worktree. The `slipway` CLI is on PATH while this plugin is enabled (if not, use `"${CLAUDE_PLUGIN_ROOT}/bin/slipway"`). Its exit codes: 0 done, 1 error, 3 failed, 4 blocked, 10 still waiting (run the same command again).
+Ship the current task to staging. Run this from inside the task's worktree. The `slipway` CLI is on PATH while this plugin is enabled (if not, use `"${CLAUDE_PLUGIN_ROOT}/bin/slipway"`).
 
 What the user said about the change, if anything: $ARGUMENTS
 
@@ -25,9 +25,11 @@ What the user said about the change, if anything: $ARGUMENTS
    - No PR yet: `gh pr create --base main --title "<title>" --body "<what changed, why, how it was tested>"`.
    - An open PR: the push updated it. Update the title or body if the scope changed.
    - A merged or closed PR for this branch: the earlier work is done. Create a new branch name for this change (`git branch -m <new-name>`), push it and open a new PR.
-7. **Wait for check, merge and deploy:** `slipway wait-pr <number> --head $(git rev-parse HEAD)`. It prints the check, then the merge, then the staging deploy. Exit 10 means still going: run it again. Keep the user posted with one short line per stage.
-   - **Exit 0:** staging is live with this change. Go to step 8.
-   - **Exit 3, check failed:** the output shows the failed step and the end of its log. Fix the cause in this worktree, run the matching local check, commit, push (step 5), and wait again. If the same check fails three times, stop and explain what's wrong.
-   - **Exit 3 after the merge** (release build or staging deploy failed): show the step and error. The change is on `main`, so the fix is a new PR; for platform errors (Terraform, AWS, timeouts) suggest the user check the job on the dashboard, or share its link with whoever runs their slipway if that's someone else.
-   - **Exit 4, blocked:** read the note. "Conflicts with main": go back to step 4. "Changes platform-owned files": stop; the PR needs a review from the app's code owners (CODEOWNERS). Auto-merge turned off for this app: the PR waits for a person to merge it.
-8. **Done.** Print the staging link and the PR link. If you're a background agent running one of several tasks, stop here and report; the main session offers cleanup once all are done. Otherwise ask whether to remove this worktree. If yes, `cd` to the main checkout (`dirname "$(git rev-parse --path-format=absolute --git-common-dir)"`) and run `"${CLAUDE_PLUGIN_ROOT}/plugin/skills/coding-agent/scripts/clean-worktrees.sh"`.
+7. **Tell the user it's submitted, and stop.** Run `slipway status` once for the staging link (it doesn't wait). Then tell them in a few short lines:
+   - "Submitted PR #<number>: <url>", and what it changes in a sentence.
+   - The deployer merges it by itself once its check passes (typecheck, lint and tests), and staging updates a few minutes later at <staging link>. Nothing is running in this session any more: they can close it or ask for something else.
+   - `/status` shows when it's live. If the check or the deploy fails, it shows that too, and they can ask Claude to fix it.
+
+   Don't wait for the check, the merge or the deploy: no `slipway wait-pr`, no `gh pr checks --watch`, no polling. If you're a background agent running one of several tasks, don't message the user: report the branch, the PR link and what to try on staging, and stop.
+
+If the user comes back because the PR's check failed (`/status` lists it as `check of PR #<n> ... failed`), work in this PR's worktree: read the log with `slipway log <job-id>`, fix the cause, run the matching local check, and `/ship` again. If the PR passed its check but never merged, `slipway wait-pr <number> --max-seconds 0` says why in one look: "Conflicts with main" needs another `/ship` (step 4 rebases); "Changes platform-owned files" needs a review from the app's code owners (CODEOWNERS); or auto-merge is off for this app, so a person merges it. Once the PR is merged, `/status` offers to remove its worktree.
