@@ -1,5 +1,5 @@
 // Dashboard pages (design 5.5 "Dashboard pages"). Every signed-in user can
-// promote, roll back and confirm teardown; admins also manage accounts.
+// verify, promote, roll back and confirm teardown; admins also manage accounts.
 import { and, count, desc, eq, inArray, notInArray, type SQL } from "drizzle-orm";
 import type { SQLiteColumn, SQLiteTable } from "drizzle-orm/sqlite-core";
 import express, { type Request, type Response } from "express";
@@ -9,7 +9,7 @@ import { apps, jobs, pullRequests, releases, users, webhookDeliveries, type AppR
 import { KEEP_DELIVERIES } from "../deliveries.js";
 import { addDomain, cloudfrontHost, getDomain, removeDomain, retryDomain, type DomainChange } from "../domains.js";
 import { catchUpApp } from "../events.js";
-import { ACTIVE, enqueue, getApp, getJob, getRelease, queueDeploy, supersedeQueued } from "../jobs.js";
+import { ACTIVE, enqueue, getApp, getJob, getRelease, queueDeploy, queueVerify, supersedeQueued, verification } from "../jobs.js";
 import { ApiError } from "../errors.js";
 import { isAppEnv, shortSha, type AppEnv } from "../names.js";
 import {
@@ -127,8 +127,10 @@ export function dashboardRoutes(deps: Deps): express.Router {
         { key: "settings", label: "Settings", alert: app.status === "destroy_requested" ? "A teardown is waiting to be confirmed" : null },
       ],
       staging,
+      stagingVerification: staging ? verification(deps, staging) : null,
       prod: getRelease(deps, app.prodReleaseId),
       canPromote: !!staging && staging.status === "ready" && ["active", "failed"].includes(app.status),
+      canVerify: ["active", "failed"].includes(app.status),
       domains: { staging: getDomain(deps, app.name, "staging"), prod: getDomain(deps, app.name, "prod") },
       canChangeDomains: ["active", "failed"].includes(app.status),
       appUrl,
@@ -144,8 +146,17 @@ export function dashboardRoutes(deps: Deps): express.Router {
       view.jobs = page(rows, rowCount(deps, jobs, ofApp(jobs.app)), limit, (last) => url("jobs", limit, `job-${last.id}`));
     } else if (tab === "releases") {
       const limit = listLimit(req.query.releases);
-      const rows = deps.db.select().from(releases).where(ofApp(releases.app)).orderBy(desc(releases.id)).limit(limit).all();
-      view.releases = page(rows, rowCount(deps, releases, ofApp(releases.app)), limit, (last) => url("releases", limit, `release-${last.id}`));
+      const rows = deps.db
+        .select()
+        .from(releases)
+        .where(ofApp(releases.app))
+        .orderBy(desc(releases.id))
+        .limit(limit)
+        .all()
+        .map((release) => ({ release, verification: verification(deps, release) }));
+      view.releases = page(rows, rowCount(deps, releases, ofApp(releases.app)), limit, (last) =>
+        url("releases", limit, `release-${last.release.id}`),
+      );
       // The rollback form offers releases that built, beyond the ones listed; a row's
       // "Deploy…" link picks its release in the form.
       const ready = deps.db
@@ -226,10 +237,39 @@ export function dashboardRoutes(deps: Deps): express.Router {
       flash(req, "Nothing on staging to promote.");
       return res.redirect(`/apps/${app.name}`);
     }
+    if (!release.verifiedAt) {
+      flash(req, `Verify ${shortSha(release.commitSha)} before promoting it: prod only takes releases whose type check, lint and tests passed.`);
+      return res.redirect(`/apps/${app.name}`);
+    }
     const job = queueDeploy(deps, app.name, "prod", release, req.user!.email);
     deps.log("promote", { app: app.name, release: release.id, by: req.user!.email, job: job.id });
     flash(req, `Promoting ${shortSha(release.commitSha)} to prod (job #${job.id}).`);
     res.redirect(`/apps/${app.name}`);
+  });
+
+  // Type check, lint and tests for a release's commit. Neither a PR's check nor
+  // the release build runs them, so staging gets changes fast; prod waits for this.
+  router.post("/apps/:name/releases/:id/verify", (req, res) => {
+    const app = getApp(deps, param(req, "name"));
+    if (!app) return notFound(res, "That app");
+    const back = appUrl(app.name, appTab(req.body.tab));
+    const release = getRelease(deps, Number(param(req, "id")));
+    if (!release || release.app !== app.name || release.status !== "ready") {
+      flash(req, "Only a release that built can be verified.");
+      return res.redirect(back);
+    }
+    if (!["active", "failed"].includes(app.status)) {
+      flash(req, `${app.name} is ${app.status.replace(/_/g, " ")}; its releases can't be verified.`);
+      return res.redirect(back);
+    }
+    const job = queueVerify(deps, release, req.user!.email);
+    if (!job) {
+      flash(req, `${shortSha(release.commitSha)} is already verified.`);
+    } else {
+      deps.log("verify", { app: app.name, release: release.id, by: req.user!.email, job: job.id });
+      flash(req, `Running type check, lint and tests on ${shortSha(release.commitSha)} (job #${job.id}).`);
+    }
+    res.redirect(back);
   });
 
   // Webhooks GitHub never retried leave PRs without checks and main unbuilt;
@@ -262,6 +302,10 @@ export function dashboardRoutes(deps: Deps): express.Router {
     }
     if (!["active", "failed"].includes(app.status)) {
       flash(req, `${app.name} is ${app.status}; it can't be deployed.`);
+      return res.redirect(appUrl(app.name, "releases"));
+    }
+    if (env === "prod" && !release.verifiedAt) {
+      flash(req, `Verify ${shortSha(release.commitSha)} before deploying it to prod: prod only takes releases whose type check, lint and tests passed.`);
       return res.redirect(appUrl(app.name, "releases"));
     }
     const job = queueDeploy(deps, app.name, env, release, req.user!.email);

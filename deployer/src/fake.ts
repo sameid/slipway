@@ -256,12 +256,6 @@ export class FakeGitHub implements GitHub {
     return pull && pull.baseMain !== r.main ? 1 : 0;
   }
 
-  async treeOf(repo: string, sha: string): Promise<string> {
-    const c = this.must(repo).commits.get(sha);
-    if (!c) throw Object.assign(new Error("Not Found"), { status: 404 });
-    return sha1(JSON.stringify(Object.entries(c.files).sort(([a], [b]) => a.localeCompare(b))));
-  }
-
   async updateBranch(repo: string, number: number, expectedHeadSha: string): Promise<"updated" | "conflict"> {
     const r = this.must(repo);
     const pull = this.mustPull(r, number);
@@ -377,8 +371,9 @@ export class FakeRuns implements Runs {
 
   private steps(input: StartRunInput): string[] {
     if (input.kind === "build-release") {
-      const steps = ["app-yaml", "secret-scan", "npm-ci", "typecheck", "lint", "test", "migrations-check", "web-build", "docker-build"];
-      return input.env.MODE === "release" ? [...steps, "publish"] : steps;
+      if (input.env.MODE === "check") return ["prepare", "app-yaml", "secret-scan"];
+      if (input.env.MODE === "verify") return ["prepare", "app-yaml", "npm-ci", "typecheck", "lint", "test"];
+      return ["prepare", "app-yaml", "secret-scan", "npm-ci", "migrations-check", "web-build", "docker-build", "publish"];
     }
     if (input.env.ACTION === "destroy") return ["terraform-destroy"];
     if (input.env.ENV === "shared") return ["terraform-apply"];
@@ -404,10 +399,12 @@ export class FakeRuns implements Runs {
     const run = this.runs.get(id);
     if (!run) return null;
     if (!run.result && this.opts.autoFinishMs !== undefined && this.now() - run.createdAt >= this.opts.autoFinishMs) {
-      const failStep =
+      const marked =
         run.input.kind === "build-release" && run.input.env.APP && run.input.env.COMMIT_SHA
           ? this.opts.github?.failStepFor(run.input.env.APP, run.input.env.COMMIT_SHA)
           : undefined;
+      // A commit that fails its tests passes its check and builds; only verifying it fails.
+      const failStep = marked && this.steps(run.input).includes(marked) ? marked : undefined;
       this.finish(id, failStep ? "failed" : "succeeded", { failStep });
     }
     const iso = (ms: number) => new Date(ms).toISOString();

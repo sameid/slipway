@@ -18,7 +18,7 @@ import {
 } from "./db/schema.js";
 import { domainDeployFinished, domainDeployStarted, domainInputs, domainsTornDown, pollDomains } from "./domains.js";
 import { secretInputs, secretsDeployFinished, secretsDeployStarted } from "./secrets.js";
-import { finishJob, getApp, getJob, getRelease } from "./jobs.js";
+import { finishJob, getApp, getJob, getRelease, markVerified } from "./jobs.js";
 import { CHECK_CONTEXT, deployContext, isAppEnv, shortSha, type AppEnv } from "./names.js";
 import { parseFailure, type RunInfo } from "./runs.js";
 
@@ -130,6 +130,7 @@ export class Worker {
     this.deps.log("job succeeded", { job: job.id, app: job.app, env: job.env, kind: job.kind });
 
     if (job.kind === "check") return this.onCheckFinished(app, job);
+    if (job.kind === "verify") return markVerified(this.deps, job);
     if (job.kind === "build") {
       const digest = exported.IMAGE_DIGEST;
       const artifact = exported.WEB_ARTIFACT;
@@ -225,6 +226,8 @@ export class Worker {
     this.failRegistration(app, job);
 
     if (job.kind === "check") return this.onCheckFinished(app, job);
+    // Shown on the dashboard, where it was started; nothing on GitHub waits for it.
+    if (job.kind === "verify") return;
     const release = getRelease(this.deps, job.releaseId);
     const where = job.kind === "build" ? "Building" : job.kind === "destroy" ? `Tearing down ${job.env}` : `Deploying to ${job.env}`;
     const message = `${where} \`${release ? shortSha(release.commitSha) : job.env}\` failed${
@@ -271,7 +274,7 @@ export class Worker {
    */
   private failRegistration(app: AppRow, job: JobRow): void {
     const current = getApp(this.deps, app.name);
-    if (current?.status !== "registering" || job.kind === "check") return;
+    if (current?.status !== "registering" || job.kind === "check" || job.kind === "verify") return;
     this.deps.db
       .update(apps)
       .set({ status: "failed", error: job.error, failedJobId: job.id })
@@ -398,7 +401,8 @@ export class Worker {
       finishJob(this.deps, job, "failed", { error: "App not found" });
       return false;
     }
-    if (job.kind === "check") return true;
+    // Neither touches AWS.
+    if (job.kind === "check" || job.kind === "verify") return true;
 
     // Builds push to the app's ECR repo and deploys use its log group, both from the shared stack.
     if ((job.kind === "build" || job.kind === "deploy") && job.env !== "shared" && !this.sharedReady(app.name)) {
@@ -479,10 +483,9 @@ export class Worker {
 
   private async startRun(app: AppRow, job: JobRow): Promise<string> {
     const { runs, github } = this.deps;
-    if (job.kind === "check" || job.kind === "build") {
+    if (job.kind === "check" || job.kind === "build" || job.kind === "verify") {
       const sha = job.commitSha;
       if (!sha) throw new Error("job has no commit");
-      const checked = job.kind === "build" ? await this.passedCheckOfSameCode(app, sha) : undefined;
       // The deployer holds the GitHub App; the runner never sees a GitHub credential.
       return runs.start({
         kind: "build-release",
@@ -490,9 +493,8 @@ export class Worker {
         env: {
           APP: app.name,
           COMMIT_SHA: sha,
-          MODE: job.kind === "check" ? "check" : "release",
+          MODE: job.kind === "build" ? "release" : job.kind,
           ...(job.kind === "check" ? { PR_NUMBER: String(job.prNumber) } : {}),
-          ...(checked ? { VERIFIED_BY_CHECK: String(checked.id) } : {}),
         },
       });
     }
@@ -520,36 +522,6 @@ export class Worker {
       return runId;
     }
     return runs.start({ kind: "deploy-env", env });
-  }
-
-  /**
-   * A recent passed check of exactly this code, if there is one. Squash-merging
-   * a PR that was up to date with main gives a commit with the same Git tree as
-   * the head its check passed, so the release build needn't run the same type
-   * check, lint and tests again (build-release.sh). Anything uncertain, such as
-   * GitHub failing to answer, means a full build.
-   */
-  private async passedCheckOfSameCode(app: AppRow, sha: string): Promise<JobRow | undefined> {
-    const checks = this.deps.db
-      .select()
-      .from(jobs)
-      .where(and(eq(jobs.app, app.name), eq(jobs.kind, "check"), eq(jobs.status, "succeeded")))
-      .orderBy(desc(jobs.id))
-      .limit(5)
-      .all();
-    if (!checks.length) return undefined;
-    try {
-      const tree = await this.deps.github.treeOf(app.repo, sha);
-      for (const check of checks) {
-        if (check.commitSha && (await this.deps.github.treeOf(app.repo, check.commitSha)) === tree) return check;
-      }
-    } catch (err) {
-      this.deps.log("couldn't compare the build with recent checks; building in full", {
-        app: app.name,
-        error: String(err),
-      });
-    }
-    return undefined;
   }
 }
 

@@ -4,7 +4,7 @@ The two jobs behind every build and deploy (design 5.6). The **runner** runs the
 
 | File | What it does |
 |---|---|
-| `build-release.sh <phase>` | One commit of an app, in phases the runner starts one at a time, each as the right user. **prepare** (runner): unpack GitHub's zipball, check for symbolic links out of the repo, validate `app.yaml`. **verify** (build user, no AWS credentials): secret scan, `npm ci`, typecheck, lint, tests, `drizzle-kit check`, frontend build. **image** (runner): Docker build of `api/Dockerfile`. **publish** (runner, with the instance role's credentials, release mode only): push `app-<app>:<sha>` to ECR (reusing the digest if the tag exists), upload `web.tgz` and `app.yaml` to `releases/<app>/<sha>/`. |
+| `build-release.sh <phase>` | One commit of an app, in phases the runner starts one at a time, each as the right user, in one of three modes: `check` (a PR's head), `release` (a commit on `main`) or `verify` (Verify on the dashboard, which prod requires). **prepare** (runner): unpack GitHub's zipball, check for symbolic links out of the repo, validate `app.yaml`. **verify** (build user, no AWS credentials): check mode, the secret scan; release mode, the secret scan, `npm ci`, `drizzle-kit check` and the frontend build; verify mode, `npm ci`, typecheck, lint and tests. **image** (runner, release mode only): Docker build of `api/Dockerfile`. **publish** (runner, with the instance role's credentials, release mode only): push `app-<app>:<sha>` to ECR (reusing the digest if the tag exists), upload `web.tgz` and `app.yaml` to `releases/<app>/<sha>/`. |
 | `deploy-env.sh` | Runs as the runner with the instance role's credentials; never runs app code. `ENV=shared`: the app's ECR repo and log group. `ENV=staging\|prod`: checks the secrets `app.yaml` requires and injects every secret the environment has (except `SECRETS_REMOVED`), phase 1 apply, migrate task, phase 2 apply, frontend sync, health check; a custom domain (`CUSTOM_DOMAIN`, `CERTIFICATE_ARN`) is attached by both applies. `ACTION=destroy` tears a stack down (prod keeps a final snapshot). |
 | `appyaml.mjs` | Validates `app.yaml`, renders the Terraform root config (`main.tf.json`) for a stack (S3 backend key `apps/<app>/<stack>.tfstate`, pinned providers, module source relative to `modules/`), and `check-links` (no symbolic link out of a folder). |
 | `lib.sh` | Step and error logging, the exports file, tool checks. |
@@ -16,7 +16,7 @@ Every step prints `==> step: <slug>`, and every failure ends with one `ERROR: <m
 
 ## Run a check locally
 
-Use the runner's dev mode (see `deployer/README.md`, "The runner on a laptop"). It runs the same phases a PR check runs, as you, with the tools on your PATH: Node 24, Docker, and gitleaks or Docker to run its image. In dev mode a `.gitleaksignore` file is honoured; on the platform it's deleted first.
+Use the runner's dev mode (see `deployer/README.md`, "The runner on a laptop"). It runs the same phases a PR check or a verify runs, as you, with the tools on your PATH: Node 24, and gitleaks or Docker to run its image. In dev mode a `.gitleaksignore` file is honoured; on the platform it's deleted first.
 
 ## Tests
 

@@ -37,6 +37,8 @@ export function releaseJson(r: ReleaseRow | undefined) {
     shortSha: shortSha(r.commitSha),
     status: r.status,
     imageDigest: r.imageDigest,
+    // Type check, lint and tests passed on its commit; prod only takes verified releases.
+    verified: !!r.verifiedAt,
     createdAt: r.createdAt,
   };
 }

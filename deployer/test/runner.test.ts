@@ -136,9 +136,10 @@ describe("runner", () => {
     expect(await client.logTail(id, 2)).toHaveLength(2);
   });
 
-  it("skips publish in check mode and runs deploys with the deploy profile", async () => {
-    const { client } = await start();
+  it("builds no image for checks and verify runs, and runs deploys with the deploy profile", async () => {
+    const { client } = await start({ maxBuilds: 2 });
     const check = await client.start({ ...release(), env: { APP: "loan-tracker", COMMIT_SHA: "b".repeat(40), MODE: "check", PR_NUMBER: "7" } });
+    const verify = await client.start({ ...release(), env: { APP: "loan-tracker", COMMIT_SHA: "c".repeat(40), MODE: "verify" } });
     const deploy = await client.start({
       kind: "deploy-env",
       env: {
@@ -148,8 +149,12 @@ describe("runner", () => {
         CERTIFICATE_ARN: "arn:aws:acm:us-east-1:123456789012:certificate/0f0e0d0c-0000-4000-8000-000000000001",
       },
     });
-    expect((await until(client, check, ["succeeded", "failed"])).exported).toEqual({});
-    expect((await client.logTail(check, 100)).join("\n")).not.toContain("step: publish");
+    for (const id of [check, verify]) {
+      expect(await until(client, id, ["succeeded", "failed"])).toMatchObject({ status: "succeeded", exported: {} });
+      const log = (await client.logTail(id, 100)).join("\n");
+      expect(log).toMatch(/==> step: prepare[\s\S]*==> step: verify/);
+      expect(log).not.toMatch(/step: (image|publish)/);
+    }
     const done = await until(client, deploy, ["succeeded", "failed"]);
     expect(done).toMatchObject({ status: "succeeded", exported: { APP_URL: "https://d123.cloudfront.net" } });
     expect((await client.logTail(deploy, 100)).join("\n")).toContain("deploy profile=slipway-deploy");

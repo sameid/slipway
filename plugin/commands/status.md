@@ -10,7 +10,7 @@ App name from the user, if any: $ARGUMENTS
 
 1. Run `slipway status` from inside the app's repo, or `slipway status --app <name>` if a name was given.
 2. Summarize in a few lines:
-   - staging and prod: link, release (short commit SHA) and when, last deploy result;
+   - staging and prod: link, release (short commit SHA) and when, whether it's verified (type check, lint and tests passed; prod needs it), last deploy result;
    - anything running now;
    - the last failure, if any, with its step and error. If the user wants details, `slipway log <job-id>` prints the log. If it's a PR's check, offer to fix it in that PR's worktree and `/ship` again;
    - the dashboard link (where a person promotes staging to prod or rolls back).

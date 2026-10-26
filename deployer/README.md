@@ -104,7 +104,7 @@ const id = await runs.start({
 });
 ```
 
-Check mode needs Node 24 and Docker; gitleaks is used from PATH, or from its Docker image. Publish and deploy phases use your own AWS credentials in dev mode, so don't start them against a real account unless you mean to.
+`MODE: "check"` runs a PR's check (`app.yaml` and the secret scan); `MODE: "verify"` runs what Verify on the dashboard runs (`npm ci`, type check, lint, tests). Both need Node 24; gitleaks is used from PATH, or from its Docker image. `MODE: "release"` also needs Docker, and its publish phase and deploys use your own AWS credentials in dev mode, so don't start them against a real account unless you mean to.
 
 ## Tests
 

@@ -180,15 +180,15 @@ describe("plugin API", () => {
     await api("/api/apps", { body: { name: "loan-tracker" } });
     await t.worker.tick();
     await finishRunning(t);
-    await finishRunning(t, "failed", () => true, { failStep: "test", error: "1 test failed" });
+    await finishRunning(t, "failed", () => true, { failStep: "web-build", error: "Could not resolve ./App" });
     const { body } = await api("/api/apps/loan-tracker");
     expect(body).toMatchObject({
       status: "failed",
       phase: "failed",
-      error: "1 test failed",
-      failedJob: { kind: "build", failedStep: "test", error: "1 test failed" },
+      error: "Could not resolve ./App",
+      failedJob: { kind: "build", failedStep: "web-build", error: "Could not resolve ./App" },
     });
     const log = await api(body.failedJob.logPath);
-    expect(log.body).toContain("ERROR: 1 test failed");
+    expect(log.body).toContain("ERROR: Could not resolve ./App");
   });
 });

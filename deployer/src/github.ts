@@ -54,8 +54,6 @@ export interface GitHub {
   listPullFiles(repo: string, number: number): Promise<string[]>;
   /** How many commits `base` has that `headSha` doesn't. */
   behindBy(repo: string, base: string, headSha: string): Promise<number>;
-  /** The commit's Git tree: equal trees mean byte-identical files. */
-  treeOf(repo: string, sha: string): Promise<string>;
   updateBranch(repo: string, number: number, expectedHeadSha: string): Promise<"updated" | "conflict">;
   squashMerge(repo: string, number: number, headSha: string, title: string): Promise<MergeResult>;
   deleteBranch(repo: string, branch: string): Promise<void>;
@@ -305,15 +303,6 @@ export class OctokitGitHub implements GitHub {
       per_page: 1,
     });
     return data.behind_by;
-  }
-
-  async treeOf(repo: string, sha: string): Promise<string> {
-    const octokit = await this.octokit();
-    const { data } = await octokit.request("GET /repos/{owner}/{repo}/git/commits/{commit_sha}", {
-      ...split(repo),
-      commit_sha: sha,
-    });
-    return data.tree.sha;
   }
 
   async updateBranch(repo: string, number: number, expectedHeadSha: string): Promise<"updated" | "conflict"> {

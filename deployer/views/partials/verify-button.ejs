@@ -1,0 +1,6 @@
+<%# Runs type check, lint and tests on `release`'s commit, then comes back to this tab. %>
+<form method="post" action="/apps/<%= app.name %>/releases/<%= release.id %>/verify">
+  <input type="hidden" name="_csrf" value="<%= csrfToken %>">
+  <input type="hidden" name="tab" value="<%= tab %>">
+  <button class="button <%= locals.primary ? "button--primary" : "button--secondary" %> button--sm"><%= label %></button>
+</form>

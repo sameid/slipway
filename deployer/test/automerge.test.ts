@@ -53,53 +53,6 @@ describe("auto-merge", () => {
     expect(t.github.repo(REPO)!.comments.at(-1)!.body).toMatch(/^Live on staging: https:/);
   });
 
-  describe("the release build after a merge", () => {
-    const lastReleaseBuild = (t: ReturnType<typeof setup>) =>
-      [...t.runs.runs.values()].map((r) => r.input).filter((i) => i.kind === "build-release" && i.env.MODE === "release").at(-1)!;
-
-    it("names the check that already passed the same code, so it isn't verified twice", async () => {
-      const t = setup();
-      routeEvents(t);
-      await liveApp(t);
-      const pull = t.github.openPull(REPO);
-      await passingCheck(t, pull.number);
-      await t.worker.tick();
-      const check = jobsOf(t).find((j) => j.kind === "check" && j.prNumber === pull.number)!;
-      expect(lastReleaseBuild(t).env).toMatchObject({ COMMIT_SHA: t.github.repo(REPO)!.main, VERIFIED_BY_CHECK: String(check.id) });
-    });
-
-    it("verifies in full when no passed check had exactly this code", async () => {
-      const t = setup();
-      routeEvents(t);
-      await liveApp(t);
-      const pull = t.github.openPull(REPO);
-      await passingCheck(t, pull.number);
-      await t.worker.tick();
-      await finishRunning(t); // the merge's build
-      await finishRunning(t); // and its deploy
-      // Pushed straight to main: no check has seen this tree.
-      t.github.pushToMain(REPO, { "src/hotfix.ts": "export {};\n" });
-      await drainEvents(t);
-      await t.worker.tick();
-      expect(lastReleaseBuild(t).env.COMMIT_SHA).toBe(t.github.repo(REPO)!.main);
-      expect(lastReleaseBuild(t).env.VERIFIED_BY_CHECK).toBeUndefined();
-    });
-
-    it("verifies in full when GitHub can't say what the trees are", async () => {
-      const t = setup();
-      routeEvents(t);
-      await liveApp(t);
-      t.github.treeOf = async () => {
-        throw new Error("GitHub is down");
-      };
-      const pull = t.github.openPull(REPO);
-      await passingCheck(t, pull.number);
-      await t.worker.tick();
-      expect(lastReleaseBuild(t).env.COMMIT_SHA).toBe(t.github.repo(REPO)!.main);
-      expect(lastReleaseBuild(t).env.VERIFIED_BY_CHECK).toBeUndefined();
-    });
-  });
-
   it("blocks PRs that touch .github/ or CODEOWNERS", async () => {
     const t = setup();
     routeEvents(t);
@@ -198,10 +151,10 @@ describe("auto-merge", () => {
     const pull = t.github.openPull(REPO);
     await drainEvents(t);
     await t.worker.tick();
-    await finishRunning(t, "failed", (j) => j.kind === "check", { failStep: "lint", error: "3 problems" });
+    await finishRunning(t, "failed", (j) => j.kind === "check", { failStep: "secret-scan", error: "gitleaks found a key" });
     const pr = pullJson(t.deps, getApp(t.deps, "loan-tracker")!, pull.number);
     expect(pr.status).toBe("check_failed");
-    expect(pr.failure).toMatchObject({ step: "lint", message: "3 problems" });
-    expect(t.github.repo(REPO)!.comments.at(-1)!.body).toMatch(/The check failed in step `lint`: 3 problems/);
+    expect(pr.failure).toMatchObject({ step: "secret-scan", message: "gitleaks found a key" });
+    expect(t.github.repo(REPO)!.comments.at(-1)!.body).toMatch(/The check failed in step `secret-scan`: gitleaks found a key/);
   });
 });

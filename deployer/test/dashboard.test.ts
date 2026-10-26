@@ -1,8 +1,12 @@
+import { eq } from "drizzle-orm";
 import { afterEach, describe, expect, it } from "vitest";
 import { ago, duration } from "../src/app.js";
 import { jobs, pullRequests, releases } from "../src/db/schema.js";
 import { receiveGithubEvent } from "../src/deliveries.js";
-import { addUser, Browser, jobsOf, liveApp, serve, setup, type TestEnv } from "./helpers.js";
+import { FakeRuns } from "../src/fake.js";
+import { getApp, getRelease } from "../src/jobs.js";
+import { appJson } from "../src/serialize.js";
+import { addUser, Browser, finishRunning, jobsOf, liveApp, serve, setup, type TestEnv } from "./helpers.js";
 
 let close: (() => Promise<void>) | undefined;
 afterEach(async () => {
@@ -173,6 +177,110 @@ describe("the app page", () => {
     const release = t.deps.db.select().from(releases).all()[0]!;
     expect(await location("/apps/loan-tracker/rollback", { env: "staging", release_id: String(release.id) })).toBe("/apps/loan-tracker");
     expect(await location("/apps/loan-tracker/destroy/cancel", {})).toBe("/apps/loan-tracker?tab=settings");
+    expect(await location(`/apps/loan-tracker/releases/${release.id}/verify`, { tab: "releases" })).toBe("/apps/loan-tracker?tab=releases");
+    expect(await location(`/apps/loan-tracker/releases/${release.id}/verify`, {})).toBe("/apps/loan-tracker");
+  });
+});
+
+describe("verifying releases", () => {
+  it("keeps a release off prod until its type check, lint and tests pass", async () => {
+    const t = setup();
+    await liveApp(t);
+    const release = getRelease(t.deps, getApp(t.deps, "loan-tracker")!.stagingReleaseId)!;
+    expect(appJson(t.deps, getApp(t.deps, "loan-tracker")!).staging.release).toMatchObject({ id: release.id, verified: false });
+    const b = await signedIn(t);
+    const page = async () => (await b.request("/apps/loan-tracker")).text;
+    const _csrf = await b.csrf("/apps/loan-tracker");
+    const promote = () => b.request("/apps/loan-tracker/promote", { form: { _csrf } });
+    const verify = () => b.request(`/apps/loan-tracker/releases/${release.id}/verify`, { form: { _csrf } });
+    const prodDeploys = () => jobsOf(t).filter((j) => j.env === "prod");
+
+    // Staging says what hasn't run, and Promote waits for it.
+    let html = await page();
+    expect(html).toContain("not verified");
+    expect(html).toContain("Type check, lint and tests haven't run on this release.");
+    expect(html).toMatch(/button--sm" disabled>Promote \w{7} to prod/);
+    await promote();
+    expect(prodDeploys()).toHaveLength(0);
+    expect(await page()).toContain(`Verify ${release.commitSha.slice(0, 7)} before promoting it`);
+
+    // Verify runs them on the release's commit, once at a time.
+    await verify();
+    await verify();
+    expect(jobsOf(t).filter((j) => j.kind === "verify")).toMatchObject([
+      { env: "verify", releaseId: release.id, commitSha: release.commitSha, status: "queued", requestedBy: "ada@example.com" },
+    ]);
+    await t.worker.tick();
+    expect([...t.runs.runs.values()].at(-1)!.input).toMatchObject({
+      kind: "build-release",
+      env: { APP: "loan-tracker", COMMIT_SHA: release.commitSha, MODE: "verify" },
+    });
+    expect(await page()).toContain("Running type check, lint and tests.");
+
+    // A failure says where, and can be run again.
+    await finishRunning(t, "failed", (j) => j.kind === "verify", { failStep: "test", error: "2 tests failed" });
+    html = await page();
+    expect(html).toContain("verify failed");
+    expect(html).toContain("test: 2 tests failed");
+    expect(html).toContain("Verify again");
+    await promote();
+    expect(prodDeploys()).toHaveLength(0);
+
+    await verify();
+    await t.worker.tick();
+    await finishRunning(t, "succeeded", (j) => j.kind === "verify");
+    expect(getRelease(t.deps, release.id)!.verifiedAt).toBe(new Date(t.clock.now).toISOString());
+    html = await page();
+    expect(html).toContain("Type check, lint and tests passed.");
+    expect(html).toMatch(/button--primary button--sm" >Promote \w{7} to prod/);
+    await promote();
+    expect(prodDeploys()).toMatchObject([{ kind: "deploy", releaseId: release.id, status: "queued" }]);
+    await verify();
+    expect(await page()).toContain("is already verified");
+    expect(jobsOf(t).filter((j) => j.kind === "verify")).toHaveLength(2);
+  });
+
+  it("only rolls prod to a verified release", async () => {
+    const t = setup();
+    await liveApp(t);
+    const release = t.deps.db.select().from(releases).all()[0]!;
+    const b = await signedIn(t);
+    const _csrf = await b.csrf("/apps/loan-tracker");
+    const rollback = async (env: string) =>
+      (await b.request("/apps/loan-tracker/rollback", { form: { _csrf, env, release_id: String(release.id) } })).res.headers.get("location");
+
+    const releasesTab = (await b.request("/apps/loan-tracker?tab=releases")).text;
+    expect(releasesTab).toContain(" · not verified</option>");
+    expect(releasesTab).toContain(`action="/apps/loan-tracker/releases/${release.id}/verify"`);
+    expect(await rollback("prod")).toBe("/apps/loan-tracker?tab=releases");
+    expect(jobsOf(t).filter((j) => j.env === "prod")).toHaveLength(0);
+    expect(await rollback("staging")).toBe("/apps/loan-tracker");
+
+    t.deps.db.update(releases).set({ verifiedAt: new Date(t.clock.now).toISOString() }).where(eq(releases.id, release.id)).run();
+    expect(await rollback("prod")).toBe("/apps/loan-tracker");
+    expect(jobsOf(t).filter((j) => j.env === "prod")).toMatchObject([{ kind: "deploy", releaseId: release.id }]);
+    expect((await b.request("/apps/loan-tracker?tab=releases")).text).not.toContain("not verified");
+  });
+
+  it("runs only what each mode needs: a commit whose tests fail still merges and reaches staging", async () => {
+    const t = setup();
+    const sha = t.github.pushToMain("acme/loan-tracker", { "src/broken.test.ts": "fails" }, "test");
+    const runs = new FakeRuns({ github: t.github, autoFinishMs: 0 });
+    const run = async (MODE: string) => {
+      const id = await runs.start({ kind: "build-release", sourceZip: Buffer.from("zip"), env: { APP: "loan-tracker", COMMIT_SHA: sha, MODE } });
+      return { status: (await runs.get(id))!.status, log: (await runs.logTail(id, 100)).join("\n") };
+    };
+    const check = await run("check");
+    expect(check.status).toBe("succeeded");
+    expect(check.log).toContain("step: secret-scan");
+    expect(check.log).not.toContain("step: npm-ci");
+    const build = await run("release");
+    expect(build.status).toBe("succeeded");
+    expect(build.log).toMatch(/step: web-build[\s\S]*step: docker-build[\s\S]*step: publish/);
+    expect(build.log).not.toMatch(/step: (typecheck|lint|test)\b/);
+    const verify = await run("verify");
+    expect(verify.status).toBe("failed");
+    expect(verify.log).toMatch(/step: typecheck[\s\S]*step: lint[\s\S]*step: test\nERROR/);
   });
 });
 

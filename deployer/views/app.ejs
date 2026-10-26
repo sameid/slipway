@@ -30,17 +30,25 @@
     <div class="card__content gap-2 text-sm">
       <% if (staging) { %>
         <p>Release <%- include("partials/sha", { sha: staging.commitSha, shaRepo: app.repo }) %> <span class="text-muted">#<%= staging.id %></span></p>
+        <% const v = stagingVerification; %>
+        <p class="flex flex-wrap items-center gap-x-2 gap-y-1">
+          <%- include("partials/verification", { v }) %>
+          <span class="text-muted"><% if (v.state === "verified") { %>Type check, lint and tests passed.<% } else if (v.state === "verifying") { %>Running type check, lint and tests.<% } else if (v.state === "failed") { %><span class="text-danger"><%= v.job.failedStep ? v.job.failedStep + ": " : "" %><%= v.job.error %></span><% } else { %>Type check, lint and tests haven't run on this release.<% } %></span>
+        </p>
       <% } else { %><p class="text-muted">Not deployed yet.</p><% } %>
       <% if (app.stagingUrl) { %><p><a class="link" href="<%= app.stagingUrl %>" target="_blank" rel="noopener"><%= app.stagingUrl %></a></p><% } %>
       <%- include("partials/env-domain", { env: "staging", domain: domains.staging, deployed: !!app.stagingUrl }) %>
     </div>
-    <% if (canPromote) { %>
-    <div class="card__footer gap-3">
+    <% if (canPromote) { const onProd = prod && prod.id === staging.id; const verified = stagingVerification.state === "verified"; %>
+    <div class="card__footer flex-wrap gap-3">
+      <% if (canVerify && ["unverified", "failed"].includes(stagingVerification.state)) { %>
+      <%- include("partials/verify-button", { release: staging, label: stagingVerification.state === "failed" ? "Verify again" : "Verify", primary: true }) %>
+      <% } %>
       <form method="post" action="/apps/<%= app.name %>/promote">
         <input type="hidden" name="_csrf" value="<%= csrfToken %>">
-        <button class="button button--primary button--sm" <%= prod && prod.id === staging.id ? "disabled" : "" %>>Promote <%= shortSha(staging.commitSha) %> to prod</button>
+        <button class="button <%= verified ? "button--primary" : "button--secondary" %> button--sm" <%= onProd || !verified ? "disabled" : "" %>>Promote <%= shortSha(staging.commitSha) %> to prod</button>
       </form>
-      <% if (prod && prod.id === staging.id) { %><span class="text-xs text-muted">Prod already runs this release.</span><% } %>
+      <% if (onProd) { %><span class="text-xs text-muted">Prod already runs this release.</span><% } else if (!verified) { %><span class="text-xs text-muted">Prod only takes verified releases.</span><% } %>
     </div>
     <% } %>
   </div>
@@ -103,14 +111,14 @@
 
 <% } else if (tab === "releases") { %>
 <% if (ready.length && canRollback) { %>
-<%- include("partials/section", { heading: "Roll back or redeploy", sectionNote: "Deploy any release that built. Rollbacks deploy older code but never reverse database migrations." }) %>
+<%- include("partials/section", { heading: "Roll back or redeploy", sectionNote: "Deploy any release that built to staging; prod only takes verified ones. Rollbacks deploy older code but never reverse database migrations." }) %>
 <form method="post" action="/apps/<%= app.name %>/rollback" id="rollback" class="card card--default scroll-mt-20 flex-row flex-wrap items-end gap-4">
   <input type="hidden" name="_csrf" value="<%= csrfToken %>">
   <div class="textfield min-w-64 flex-1">
     <label class="label" for="release_id">Release</label>
     <select class="input" id="release_id" name="release_id">
       <% for (const r of ready) { %>
-        <option value="<%= r.id %>" <%= r.id === picked ? "selected" : "" %>><%= shortSha(r.commitSha) %> · #<%= r.id %> · <%= fmt(r.createdAt) %><%= staging && staging.id === r.id ? " · on staging" : "" %><%= prod && prod.id === r.id ? " · on prod" : "" %></option>
+        <option value="<%= r.id %>" <%= r.id === picked ? "selected" : "" %>><%= shortSha(r.commitSha) %> · #<%= r.id %> · <%= fmt(r.createdAt) %><%= staging && staging.id === r.id ? " · on staging" : "" %><%= prod && prod.id === r.id ? " · on prod" : "" %><%= r.verifiedAt ? "" : " · not verified" %></option>
       <% } %>
     </select>
   </div>
@@ -130,16 +138,24 @@
   <div class="table__scroll-container">
     <table class="table__content">
       <thead class="table__header"><tr>
-        <th class="table__column">#</th><th class="table__column">Commit</th><th class="table__column">Status</th><th class="table__column">Built</th><th class="table__column">Image</th><% if (canRollback) { %><th class="table__column"><span class="sr-only">Deploy</span></th><% } %>
+        <th class="table__column">#</th><th class="table__column">Commit</th><th class="table__column">Status</th><th class="table__column" title="Type check, lint and tests">Verified</th><th class="table__column">Built</th><th class="table__column">Image</th><% if (canRollback) { %><th class="table__column"><span class="sr-only">Deploy</span></th><% } %>
       </tr></thead>
       <tbody class="table__body">
-      <% for (const r of releases.rows) { %>
+      <% for (const { release: r, verification: v } of releases.rows) { %>
         <tr class="table__row scroll-mt-20" id="release-<%= r.id %>">
           <td class="table__cell"><%= r.id %></td>
           <td class="table__cell whitespace-nowrap"><%- include("partials/sha", { sha: r.commitSha, shaRepo: app.repo }) %>
             <% if (staging && staging.id === r.id) { %><span class="chip chip--soft chip--accent chip--sm ms-1"><span class="chip__label">staging</span></span><% } %>
             <% if (prod && prod.id === r.id) { %><span class="chip chip--soft chip--success chip--sm ms-1"><span class="chip__label">prod</span></span><% } %></td>
           <td class="table__cell"><%- include("partials/badge", { status: r.status }) %></td>
+          <td class="table__cell">
+            <% if (r.status === "ready") { %>
+            <div class="flex flex-wrap items-center gap-2">
+              <%- include("partials/verification", { v }) %>
+              <% if (canVerify && ["unverified", "failed"].includes(v.state)) { %><%- include("partials/verify-button", { release: r, label: v.state === "failed" ? "Verify again" : "Verify" }) %><% } %>
+            </div>
+            <% } %>
+          </td>
           <td class="table__cell whitespace-nowrap text-muted" title="<%= fmt(r.createdAt) %>"><%= ago(r.createdAt) %></td>
           <td class="table__cell font-mono text-xs text-muted"><%= r.imageDigest ? r.imageDigest.slice(0, 19) : "" %></td>
           <% if (canRollback) { %><td class="table__cell text-end"><% if (r.status === "ready") { %><a class="link whitespace-nowrap text-sm" href="<%= appUrl(app.name, "releases") %>&amp;release=<%= r.id %>#rollback">Deploy…</a><% } %></td><% } %>
@@ -153,7 +169,7 @@
 <%- include("partials/load-more", { list: releases }) %>
 
 <% } else if (tab === "code") { %>
-<%- include("partials/section", { heading: "Pull requests", sectionNote: "Each PR head gets a check; a passing check merges the PR unless something needs a person." }) %>
+<%- include("partials/section", { heading: "Pull requests", sectionNote: "Each PR head gets a quick check (app.yaml and a secret scan); a passing check merges the PR unless something needs a person. Type check, lint and tests run when a release is verified." }) %>
 <% if (!pulls.rows.length) { %>
   <div class="card card--default"><p class="empty-state">No pull requests seen yet. If one is open on GitHub, look for its webhook below, or use Sync with GitHub.</p></div>
 <% } else { %>

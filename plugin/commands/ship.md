@@ -11,7 +11,7 @@ What the user said about the change, if anything: $ARGUMENTS
 1. **Check where you are.** `git rev-parse --show-toplevel` must have an `app.yaml`, and `git branch --show-current` must be a task branch, not `main`.
    - On `main` in the main checkout with uncommitted work: don't commit it to `main`. Use the `coding-agent` skill to create a worktree for the task, move the changes with `git stash` / `git stash pop`, and continue there.
    - On `main` with nothing to ship: say so and stop.
-2. **Check locally first.** Run `npm run typecheck`, `npm run lint` and `npm test`, plus `npm run db:check -w api` if anything under `api/drizzle/` changed. Fix failures before going on; the PR check runs the same commands.
+2. **Type check first.** Run `npm run typecheck`, plus `npm run db:check -w api` if anything under `api/drizzle/` changed, and fix failures before going on. The PR check only validates `app.yaml` and scans for secrets, so this is what keeps type errors off staging. Lint and the full test suite run when someone verifies the release on the dashboard before promoting it to prod, so don't wait on them here.
 3. **Commit.** `git status` to review. Make sure no `.env*` file or secret value is staged. `git add -A` and commit with a clear message (imperative mood, what and why). If there's nothing new to commit but the branch has commits that aren't on GitHub yet, continue.
 4. **Rebase onto the latest main.** `git fetch origin main`, then `git rebase origin/main`.
    - **Drizzle migration conflicts** (anything under `api/drizzle/`, usually `meta/_journal.json` or a snapshot): this branch's migration was numbered against an older `main`. Run `git rebase --abort`, then:
@@ -27,7 +27,7 @@ What the user said about the change, if anything: $ARGUMENTS
    - A merged or closed PR for this branch: the earlier work is done. Create a new branch name for this change (`git branch -m <new-name>`), push it and open a new PR.
 7. **Tell the user it's submitted, and stop.** Run `slipway status` once for the staging link (it doesn't wait). Then tell them in a few short lines:
    - "Submitted PR #<number>: <url>", and what it changes in a sentence.
-   - The deployer merges it by itself once its check passes (typecheck, lint and tests), and staging updates a few minutes later at <staging link>. Nothing is running in this session any more: they can close it or ask for something else.
+   - The deployer merges it by itself once a quick check passes (app.yaml and a secret scan), and staging updates a few minutes later at <staging link>. Nothing is running in this session any more: they can close it or ask for something else.
    - `/status` shows when it's live. If the check or the deploy fails, it shows that too, and they can ask Claude to fix it.
 
    Don't wait for the check, the merge or the deploy: no `slipway wait-pr`, no `gh pr checks --watch`, no polling. If you're a background agent running one of several tasks, don't message the user: report the branch, the PR link and what to try on staging, and stop.

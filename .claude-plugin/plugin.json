@@ -1,7 +1,7 @@
 {
   "name": "slipway",
   "displayName": "slipway",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Build and ship apps on your own AWS and GitHub accounts: /setup puts slipway in your AWS account, /new-app gives you a GitHub repo and a live staging link, /ship opens a PR that auto-merges and deploys, /status, /secret and /destroy-app do the rest.",
   "author": {
     "name": "sameid",

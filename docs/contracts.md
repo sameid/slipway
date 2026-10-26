@@ -127,19 +127,24 @@ Tools on the instance: Docker and AWS CLI v2 from Amazon Linux; Terraform and gi
 
 **Log conventions** (the deployer reads the run log through the socket API):
 
-- Before each step a script prints `==> step: <slug>` (for example `prepare`, `app-yaml`, `secret-scan`, `npm-ci`, `typecheck`, `lint`, `test`, `migrations-check`, `verified` (instead of the four before it, when a passed check had the same code), `web-build`, `docker-build`, `publish`, `secrets-check`, `terraform-phase1`, `migrate`, `rollout-settings`, `terraform-phase2`, `web-sync`, `health-check`, `terraform-apply` (shared stack), `terraform-destroy`, `delete-alarms`, `delete-secrets`, `release-cleanup`).
+- Before each step a script prints `==> step: <slug>` (for example `prepare`, `app-yaml`, `secret-scan`, `npm-ci`, `typecheck`, `lint`, `test`, `migrations-check`, `web-build`, `docker-build`, `publish`, `secrets-check`, `terraform-phase1`, `migrate`, `rollout-settings`, `terraform-phase2`, `web-sync`, `health-check`, `terraform-apply` (shared stack), `terraform-destroy`, `delete-alarms`, `delete-secrets`, `release-cleanup`).
 - On failure it prints one line `ERROR: <message>` and exits non-zero. The deployer stores the last step slug as the job's `failed_step` and the last `ERROR:` line as its `error`.
 - Exports: scripts write `KEY=value` lines to `$SLIPWAY_EXPORTS`; the runner returns them as `exported`.
 
 ## `build-release`
 
-Started by the deployer with `POST /runs`, `kind: "build-release"`, GitHub's zipball of the commit as `sourceZip`, and `env`: `APP`, `COMMIT_SHA` (full SHA), `MODE` (`release` | `check`), `PR_NUMBER` (check only), `VERIFIED_BY_CHECK` (release only, optional: a passed check whose commit has the same Git tree; verify then skips type check, lint, tests and the migrations check).
+Started by the deployer with `POST /runs`, `kind: "build-release"`, GitHub's zipball of the commit as `sourceZip`, and `env`: `APP`, `COMMIT_SHA` (full SHA), `MODE` (`check` | `release` | `verify`), `PR_NUMBER` (check only).
 
-`jobs/build-release.sh <phase>` runs in four phases, each started by the runner:
+The deployer starts a `check` for a PR's head, a `release` for a commit on `main`, and a `verify` when someone presses Verify on a release on the dashboard. Only `verify` runs the app's type check, lint and tests, and prod only takes releases whose commit passed one.
+
+`jobs/build-release.sh <phase>` runs in up to four phases, each started by the runner (`check` and `verify` stop after `verify`):
 
 1. `prepare` (as `slipway-runner`): unpack the zipball (its single top-level directory becomes `$SLIPWAY_WORK/src`), validate `app.yaml` (`app-yaml`), and hand the work directory to `slipway-build`.
-2. `verify` (as `slipway-build`, no AWS credentials): `secret-scan` (gitleaks), `npm-ci`, `typecheck` (`npm run typecheck`), `lint` (`npm run lint`), `test` (`npm test`), `migrations-check` (`npm run db:check -w api`), `web-build` (`web.build_command` from `app.yaml`, output in `web.output_dir`).
-3. `image` (as `slipway-runner`): `docker-build` (`docker build --platform linux/amd64 -f api/Dockerfile .` at the source root). Dockerfile `RUN` steps run in build containers with no host mounts; the instance's metadata hop limit of 1 keeps them away from its credentials.
+2. `verify` (as `slipway-build`, no AWS credentials), by mode:
+   - `check`: `secret-scan` (gitleaks).
+   - `release`: `secret-scan`, `npm-ci`, `migrations-check` (`npm run db:check -w api`), `web-build` (`web.build_command` from `app.yaml`, output in `web.output_dir`).
+   - `verify`: `npm-ci`, `typecheck` (`npm run typecheck`), `lint` (`npm run lint`), `test` (`npm test`).
+3. `image` (as `slipway-runner`, release mode only): `docker-build` (`docker build --platform linux/amd64 -f api/Dockerfile .` at the source root). Dockerfile `RUN` steps run in build containers with no host mounts; the instance's metadata hop limit of 1 keeps them away from its credentials.
 4. `publish` (as `slipway-runner` with the instance role, release mode only): push the image to `app-<app>:<COMMIT_SHA>` (reusing the existing digest if that tag already exists, since tags are immutable), upload `web.tgz` (contents of `output_dir`, no top-level folder) and `app.yaml` to `releases/<app>/<sha>/`. The local image is removed afterwards.
 
 A failing phase ends the run.
@@ -234,8 +239,8 @@ Shapes:
 ```ts
 type Job = {
   id: number; app: string;
-  env: "shared" | "staging" | "prod" | "build" | "check";
-  kind: "check" | "build" | "deploy" | "destroy";
+  env: "shared" | "staging" | "prod" | "build" | "check" | "verify";
+  kind: "check" | "build" | "verify" | "deploy" | "destroy";
   status: "queued" | "running" | "succeeded" | "failed" | "superseded";
   releaseId: number | null; commitSha: string | null; prNumber: number | null;
   requestedBy: string; failedStep: string | null; error: string | null;
@@ -243,7 +248,11 @@ type Job = {
   logPath: string;        // "/api/apps/<app>/jobs/<id>/log"
   dashboardUrl: string;   // "<deployer>/apps/<app>/jobs/<id>"
 };
-type Release = { id: number; commitSha: string; shortSha: string; status: "building" | "ready" | "failed"; imageDigest: string | null; createdAt: string };
+type Release = {
+  id: number; commitSha: string; shortSha: string; status: "building" | "ready" | "failed"; imageDigest: string | null;
+  verified: boolean;      // type check, lint and tests passed on its commit (a verify job); prod only takes verified releases
+  createdAt: string;
+};
 type EnvState = {
   url: string | null;             // the CloudFront URL; it always works
   customDomain: { hostname: string; status: "requesting" | "validating" | "attaching" | "active" | "failed" | "removing" } | null;
@@ -293,12 +302,13 @@ type SecretStatus = {
 | `POST /api/apps/:name/secrets/:env/:key/link` | | `201 { "url": "<deployer>/secrets/set/<token>", "linkId": "<opaque>", "expiresAt": "..." }`. Any name works, declared or not; `400` if it isn't UPPER_SNAKE_CASE (at most 64 characters), the platform sets it, only `app.yaml` may declare it (`NODE_*`, `LD_*`, `PATH`, proxies, ...), or the environment would have more than 50. `409` while a deploy is removing it. |
 | `GET /api/apps/:name/secret-links/:linkId` | | `{ "status": "pending" \| "used" \| "expired", "usedAt": string \| null, "deployRequested": boolean, "redeploy": Job \| null }`. `deployRequested: false`: saved with Save only, so nothing was deployed |
 
-Browser and GitHub routes: `POST /webhooks/github`; `GET`/`POST /secrets/set/:token`; dashboard pages from design 5.5, including `GET`/`POST /apps/:name/secrets/:env` for changing several secrets at once (fields `value:<KEY>`, `new_name` and `new_value`, `env_file`, `remove` (repeated), and `deploy`: `1` Save and deploy, `0` Save only), `POST /apps/:name/secrets/:env/deploy` and `POST /apps/:name/secrets/:env/keep` (`key`).
+Browser and GitHub routes: `POST /webhooks/github`; `GET`/`POST /secrets/set/:token`; dashboard pages from design 5.5, including `GET`/`POST /apps/:name/secrets/:env` for changing several secrets at once (fields `value:<KEY>`, `new_name` and `new_value`, `env_file`, `remove` (repeated), and `deploy`: `1` Save and deploy, `0` Save only), `POST /apps/:name/secrets/:env/deploy` and `POST /apps/:name/secrets/:env/keep` (`key`), and `POST /apps/:name/releases/:id/verify` (`tab`: where to come back to).
 
 ## Deployer behaviour the plugin relies on
 
 - **Registration** queues `deploy shared` → `build` (main's head) → `deploy staging`, chained so each starts only after the previous one succeeds (a failed dependency fails the rest). `phase` reflects where that chain is; when staging succeeds the app becomes `active`.
-- **Concurrency key**: `(app, env)` for build and deploy jobs; `(app, "check", pr_number)` for checks, so checks for different PRs run in parallel.
+- **Concurrency key**: `(app, env)` for build, verify and deploy jobs (a verify job's env is `verify`); `(app, "check", pr_number)` for checks, so checks for different PRs run in parallel.
+- **Verify before prod**: a release from a merge goes to staging unverified. Promote, and a rollback to prod, need a verified release; Verify on the dashboard (`POST /apps/:name/releases/:id/verify`) queues a `verify` job for its commit (at most one at a time; none once it passed).
 - **Superseding**: a newer queued staging deploy supersedes older queued ones; a new head commit supersedes queued checks for the old head.
 - **Auto-merge refusals**: a passing check is not merged, and the PR gets status `blocked` with a `note` and a PR comment, when the PR is a draft, touches `.github/**` or `CODEOWNERS`, changes a platform-owned `app.yaml` field, the app has `auto_merge: false`, or updating the branch from `main` conflicts.
 - **Ordering**: builds and deploys of an app wait until its shared stack has deployed.

@@ -40,6 +40,7 @@ These changes came out of building the platform and checking the region. Where t
 
 14. **Custom domains (bring your own).** Someone who owns a domain can attach it to an app's staging or prod on the dashboard; see 5.10. Buying domains is still out of scope.
 15. **Secrets without a pull request.** A secret no longer has to be declared in `app.yaml` before it can be set. Every deploy injects all of an environment's parameters, and `secrets:` lists the required ones, which deploys check. Saving can deploy now or leave it to the next deploy, and secrets can be removed on the dashboard; see 5.8.
+16. **Verify before prod.** A PR's check is quick: `app.yaml`, symbolic links and a secret scan, then the PR merges. The release build skips type check, lint and tests as well, so a merge reaches staging in minutes. Those three run when someone presses **Verify** on a release on the dashboard (a `verify` job), and prod, whether by Promote or by a rollback, only takes a release whose commit passed them. Releases that built before this change count as verified, since their builds ran all three. See 5.6, 5.7 and 6.
 
 ## 1. Summary
 
@@ -446,6 +447,7 @@ releases (
   web_artifact TEXT,                 -- s3://.../web.tgz
   status TEXT NOT NULL,              -- building | ready | failed
   codebuild_id TEXT,
+  verified_at TEXT,                  -- type check, lint and tests passed on its commit; prod requires it
   created_at TEXT NOT NULL
 );
 
@@ -463,8 +465,8 @@ pull_requests (
 jobs (
   id INTEGER PRIMARY KEY,
   app TEXT NOT NULL,
-  env TEXT NOT NULL,                 -- shared | staging | prod | build | check
-  kind TEXT NOT NULL,                -- check | build | deploy | destroy
+  env TEXT NOT NULL,                 -- shared | staging | prod | build | check | verify
+  kind TEXT NOT NULL,                -- check | build | verify | deploy | destroy
   release_id INTEGER,
   pr_number INTEGER,
   status TEXT NOT NULL,              -- queued | running | succeeded | failed | superseded
@@ -502,9 +504,9 @@ The `jobs` table is also the audit log: who deployed what, where, when and with 
 
 1. For each `(app, env)` pair with no running job, pick its oldest queued job and start it. This guarantees two deploys of the same app and environment never overlap, while different apps run in parallel.
 2. If several deploys to staging are queued for one app, run only the newest and mark the others `superseded`. The same applies to checks for a PR that has received new commits.
-3. To start a `check` or `build` job, download the commit's zipball from GitHub with the App's credentials, upload it to the sources bucket, and call `StartBuild` with that S3 object as the source.
+3. To start a `check`, `build` or `verify` job, download the commit's zipball from GitHub with the App's credentials, upload it to the sources bucket, and call `StartBuild` with that S3 object as the source.
 4. For running jobs, call CodeBuild `BatchGetBuilds` and update their status.
-5. On a finished `check` job, post the commit status and, if it passed and auto-merge applies, merge the PR (see 5.7).
+5. On a finished `check` job, post the commit status and, if it passed and auto-merge applies, merge the PR (see 5.7). A passed `verify` job marks every release of its commit verified.
 6. On a finished deploy, update the app's current release and URLs, post a commit status, and comment the staging link on the merged PR.
 
 **Catch-up on startup**
@@ -526,7 +528,7 @@ GitHub does not automatically retry failed webhook deliveries. On every start, t
 *Dashboard: local accounts*
 
 - Users sign in with email and password. Passwords are hashed with argon2id.
-- **Every user can promote to prod and roll back.** Admins can additionally create, disable and reset accounts.
+- **Every user can verify releases, promote to prod and roll back.** Admins can additionally create, disable and reset accounts.
 - The first admin is created on the box with `node dist/scripts/create-admin.js`, run through SSM Session Manager.
 - Admins create accounts from the dashboard's Users page with a temporary password. The user must change it at first login.
 - Sessions are HTTP-only, `Secure`, `SameSite=Lax` cookies, expiring after 12 hours.
@@ -558,7 +560,7 @@ The plugin sends the colleague's `gh auth token`. The deployer checks it with Gi
 |---|---|
 | `/login`, `/password` | Sign in, change password |
 | `/` | Jobs in progress, the last webhook received, and every app: staging release, prod release, last deploy result, links |
-| `/apps/:name` | Staging and prod with Promote, and Sync with GitHub, above four tabs (`?tab=`): **Jobs** (job history with log links; the default), **Releases** (Rollback, release history), **Code** (pull requests and their checks, recent webhooks) and **Settings** (secret names and status, confirm teardown). Jobs, releases and pull requests show 25 at a time, with Load more |
+| `/apps/:name` | Staging and prod with Verify and Promote, and Sync with GitHub, above four tabs (`?tab=`): **Jobs** (job history with log links; the default), **Releases** (Rollback, release history with each release's verification and Verify), **Code** (pull requests and their checks, recent webhooks) and **Settings** (secret names and status, confirm teardown). Jobs, releases and pull requests show 25 at a time, with Load more |
 | `/apps/:name/domains/:env` | Add a custom domain to an environment, see the DNS records to create and the domain's status, retry or remove it (5.10) |
 | `/apps/:name/secrets/:env` | Add, change or remove any number of an environment's secrets at once, typed into fields or pasted as a `.env` file, then Save and deploy or Save only; Deploy for changes saved earlier (see 5.8) |
 | `/deliveries` | Webhooks: every GitHub delivery and what the deployer did with it, filterable by app and outcome |
@@ -571,12 +573,12 @@ Two shared projects serve every app. The deployer starts builds with `StartBuild
 
 **`build-release`** (privileged mode, for Docker)
 
-Inputs: `APP`, `COMMIT_SHA`, `SOURCE_S3_KEY`, `MODE` (`release` or `check`).
+Inputs: `APP`, `COMMIT_SHA`, `SOURCE_S3_KEY`, `MODE` (`check`, `release` or `verify`).
 
-1. Unpack the source zipball.
-2. Run a secret scanner (gitleaks) over the source and fail if anything looks like a committed key. Then `npm ci`, and run type checks, lint and `vitest` for `api` and `web`, plus `drizzle-kit check` to catch conflicting migrations.
-3. Build the API image. In `release` mode, push it to the app's ECR repo tagged with the commit SHA and record the digest.
-4. Build the frontend. In `release` mode, upload it to `releases/<app>/<sha>/web.tgz`.
+1. Unpack the source zipball and validate `app.yaml`.
+2. In `check` and `release` mode, run a secret scanner (gitleaks) over the source and fail if anything looks like a committed key. A `check` stops here.
+3. In `verify` mode, `npm ci`, then run type checks, lint and `vitest` for `api` and `web`, and stop. Nothing is built.
+4. In `release` mode, `npm ci` and `drizzle-kit check` to catch conflicting migrations. Build the frontend and upload it to `releases/<app>/<sha>/web.tgz`. Build the API image, push it to the app's ECR repo tagged with the commit SHA and record the digest.
 5. Write the image digest and artifact path to the build's exported variables for the deployer to read.
 
 **`deploy-env`**
@@ -596,9 +598,9 @@ Inputs: `APP`, `ENV` (`shared`, `staging`, `prod`), `IMAGE_DIGEST`, `WEB_ARTIFAC
 In v1, **PRs merge automatically once their check passes.** There is no required human review.
 
 1. A PR is opened or updated.
-2. The deployer runs `build-release` in `check` mode (install, type check, lint, tests, Docker build, frontend build; nothing is pushed) and posts the result as the `slipway/check` commit status.
+2. The deployer runs `build-release` in `check` mode (`app.yaml` and a secret scan; nothing is installed, built or pushed) and posts the result as the `slipway/check` commit status. Type check, lint and tests wait until someone verifies the release before promoting it (6, "Promote to prod"), so changes reach staging fast; `/ship` runs the type check on the laptop before it pushes.
 3. If the check passes, the PR is still open, its head commit hasn't changed, and the app has `auto_merge: true`, the deployer checks whether the branch is up to date with `main`. With several worktrees shipping in parallel, `main` often moves while a check runs. If the branch is behind, the deployer updates it through GitHub's update-branch API, which triggers a fresh check against the combined code. If the update hits a conflict, the deployer comments on the PR and `/ship` rebases. Once an up-to-date branch passes, the deployer squash-merges it and deletes the branch.
-4. The merge triggers the normal staging deploy.
+4. The merge triggers the normal staging deploy. The release isn't verified yet; the dashboard says so on the staging card.
 5. If the check fails, the deployer comments the failing step and log link on the PR. `/ship` surfaces this so Claude can fix it and push again.
 
 **Branch protection**, set by the deployer on each new repo when it registers:
@@ -686,7 +688,7 @@ The deployer handles migrations as part of every staging and prod deploy. Collea
 
 - The colleague's agent changes `api/src/db/schema.ts` and runs `drizzle-kit generate`, which writes a numbered SQL file into `api/drizzle/`. Migrations are reviewed like any other code (in v1, by the automated check).
 - Migrations must be **additive and backward compatible**: add tables, columns with defaults, and indexes. Renames and drops happen in two releases: first stop using the old column, then drop it later. This matters because during a deploy the previous release keeps running against the new schema, and a rollback runs old code against it too.
-- The `slipway-stack` skill teaches these rules, and `drizzle-kit check` in every `check` build catches migrations that collide.
+- The `slipway-stack` skill teaches these rules, and `drizzle-kit check` in every release build catches migrations that collide before they reach a database.
 
 **Running them**
 
@@ -710,7 +712,7 @@ Postgres can run schema changes inside a transaction, so a failed migration norm
 
 **Parallel worktrees**
 
-Two branches can each generate a migration with the same number, which Drizzle's migration journal treats as a conflict. `/ship` rebases onto `main` first, and if the journal conflicts, it discards the branch's generated migration and runs `drizzle-kit generate` again on top of `main`. `drizzle-kit check` in the PR check catches anything left over.
+Two branches can each generate a migration with the same number, which Drizzle's migration journal treats as a conflict. `/ship` rebases onto `main` first, and if the journal conflicts, it discards the branch's generated migration and runs `drizzle-kit generate` again on top of `main`. `drizzle-kit check` in the release build catches anything left over.
 
 ### 5.10 Custom domains
 
@@ -749,12 +751,13 @@ Any dashboard user can add or remove domains, like promoting. Apps need no chang
 
 **Promote to prod**
 
-1. Any signed-in dashboard user presses Promote. If prod is missing a declared secret, the deploy fails before changing anything and lists the missing names.
-2. Deployer queues `deploy-env prod` with staging's current release: same image digest, same frontend build. Nothing is rebuilt; only `config.json` differs, naming the environment. The job records who promoted.
+1. Any signed-in dashboard user presses **Verify** on staging's release. A `verify` job runs type check, lint and tests on its commit (`build-release` in `verify` mode, on the runner like a build). Promote stays disabled until they pass; if they fail, the card shows the failing step, and Verify can run them again.
+2. They press Promote. If prod is missing a declared secret, the deploy fails before changing anything and lists the missing names.
+3. Deployer queues `deploy-env prod` with staging's current release: same image digest, same frontend build. Nothing is rebuilt; only `config.json` differs, naming the environment. The job records who promoted.
 
 **Rollback**
 
-Any signed-in user picks an earlier release that succeeded and deploys it to staging or prod. Database migrations are not reversed, which is why migrations must be additive and backward compatible.
+Any signed-in user picks an earlier release that succeeded and deploys it to staging or prod. Prod only takes a verified release; the Releases tab can verify any release that built. Database migrations are not reversed, which is why migrations must be additive and backward compatible.
 
 **Teardown**
 
@@ -784,7 +787,7 @@ Key points:
 - The deployer, the most exposed component, holds the least AWS power. Compromising it lets an attacker deploy code that's already on `main`, not run arbitrary commands with deploy permissions.
 - Buildspecs and Terraform come only from `sameid/slipway`, which only the dev team can change.
 - **Apps are public by default:** a new app has no sign-in, so whatever it stores or shows is open to anyone with its link until its developer adds authentication. The template's `CLAUDE.md` and the `slipway-stack` skill tell the agent so, and to ask before building anything per-user.
-- **The v1 trade-off:** with auto-merge and everyone able to promote, the only things standing between agent-written code and prod are the automated checks and a person choosing to press Promote. That is a deliberate choice for speed. It's acceptable while apps are internal tools; tighten it (required reviews, or promotion limited to admins) before any app handles customer data or sensitive internal data.
+- **The v1 trade-off:** with auto-merge and everyone able to promote, the only things standing between agent-written code and prod are the automated checks (type check, lint and tests run before prod, not before staging) and a person choosing to press Promote. That is a deliberate choice for speed. It's acceptable while apps are internal tools; tighten it (required reviews, or promotion limited to admins) before any app handles customer data or sensitive internal data.
 
 ## 8. Operations
 
@@ -807,7 +810,7 @@ Platform overhead is small:
 
 | Risk | Mitigation |
 |---|---|
-| Broken or unsafe code auto-merges to staging | Checks must pass (type check, lint, tests, build); staging soaks before anyone promotes; rollback is one click |
+| Broken or unsafe code auto-merges to staging | The secret scan must pass before a merge and the build before staging changes; type check, lint and tests must pass (Verify) before prod takes a release; staging soaks before anyone promotes; rollback is one click |
 | An app stores something private before it has sign-in | `CLAUDE.md` and the `slipway-stack` skill tell the agent every route is public and to ask before building anything per-user; adding auth is the developer's call |
 | Weak tests let bad code through | Template ships with example tests and the `slipway-stack` skill tells the agent to add tests with every feature |
 | A required service isn't available in `ca-west-1` | Availability check is rollout step 1, before any building |
@@ -817,7 +820,7 @@ Platform overhead is small:
 | A bad migration breaks prod | Additive migration convention, RDS backups, staging soaks before promote |
 | A colleague commits or pastes an API key into code | gitleaks in every `check` build blocks the PR before auto-merge; values are set only through one-time browser links |
 | A one-time secret link is intercepted | Links expire in 10 minutes, work once, can only set (not read) one named key, and every use is logged |
-| Parallel worktrees produce conflicting migrations or merge conflicts | `/ship` rebases and regenerates migrations; `drizzle-kit check` in the PR check; the deployer updates out-of-date branches and re-checks before merging |
+| Parallel worktrees produce conflicting migrations or merge conflicts | `/ship` rebases and regenerates migrations; `drizzle-kit check` in the release build; the deployer updates out-of-date branches and re-checks before merging |
 | A migration breaks the running app | Migrations run before the service switches and stop the deploy on failure; additive-only rule; dev team handles destructive changes with a snapshot first |
 | DB password rotation breaks running apps | Template reads the secret at connect time and re-reads on auth failure |
 | Deploy role misused | Scoped to `app-*`, permissions boundary on created roles, buildspecs owned by the dev team |

@@ -52,6 +52,9 @@ export const releases = sqliteTable(
     webArtifact: text("web_artifact"), // s3://.../web.tgz
     status: text().notNull(), // building | ready | failed
     runId: text("run_id"), // the runner's build-release run
+    // When type check, lint and tests passed on this commit (a verify job, which
+    // someone starts on the dashboard). Prod only takes verified releases.
+    verifiedAt: text("verified_at"),
     createdAt: text("created_at").notNull(),
   },
   (t) => [index("releases_app_commit").on(t.app, t.commitSha)],
@@ -82,8 +85,8 @@ export const jobs = sqliteTable(
   {
     id: integer().primaryKey({ autoIncrement: true }),
     app: text().notNull(),
-    env: text().notNull(), // shared | staging | prod | build | check
-    kind: text().notNull(), // check | build | deploy | destroy
+    env: text().notNull(), // shared | staging | prod | build | check | verify
+    kind: text().notNull(), // check | build | verify | deploy | destroy
     releaseId: integer("release_id"),
     prNumber: integer("pr_number"),
     commitSha: text("commit_sha"),

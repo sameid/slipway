@@ -1,12 +1,12 @@
 // Queueing jobs. The worker (worker.ts) decides when they start; this file only
 // records what should happen, de-duplicating requests for the same work.
-import { and, desc, eq, inArray, ne, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, ne, sql } from "drizzle-orm";
 import { iso, type Deps } from "./deps.js";
 import { apps, jobs, pullRequests, releases, type AppRow, type JobRow, type ReleaseRow } from "./db/schema.js";
 import type { AppEnv } from "./names.js";
 
-export type JobEnv = "shared" | "staging" | "prod" | "build" | "check";
-export type JobKind = "check" | "build" | "deploy" | "destroy";
+export type JobEnv = "shared" | "staging" | "prod" | "build" | "check" | "verify";
+export type JobKind = "check" | "build" | "verify" | "deploy" | "destroy";
 export const ACTIVE = ["queued", "running"];
 
 type NewJob = {
@@ -190,6 +190,52 @@ export function queueCheck(deps: Deps, app: string, prNumber: number, headSha: s
     .where(and(eq(pullRequests.app, app), eq(pullRequests.number, prNumber)))
     .run();
   return job;
+}
+
+/**
+ * Where a release's commit stands on type check, lint and tests, which neither
+ * a PR's check nor the release build runs. `job` is the verify job to link to.
+ */
+export type Verification = { state: "verified" | "verifying" | "failed" | "unverified"; job: JobRow | null };
+
+export function verification(deps: Deps, release: ReleaseRow): Verification {
+  const job =
+    deps.db
+      .select()
+      .from(jobs)
+      .where(and(eq(jobs.app, release.app), eq(jobs.kind, "verify"), eq(jobs.commitSha, release.commitSha)))
+      .orderBy(desc(jobs.id))
+      .get() ?? null;
+  // Releases built before verify jobs existed have verifiedAt and no job.
+  if (release.verifiedAt) return { state: "verified", job: job?.status === "succeeded" ? job : null };
+  if (job && ACTIVE.includes(job.status)) return { state: "verifying", job };
+  if (job?.status === "failed") return { state: "failed", job };
+  return { state: "unverified", job: null };
+}
+
+/** Run type check, lint and tests on a release's commit. Null if they already passed. */
+export function queueVerify(deps: Deps, release: ReleaseRow, requestedBy: string): JobRow | null {
+  const current = verification(deps, release);
+  if (current.state === "verified") return null;
+  if (current.state === "verifying") return current.job;
+  return enqueue(deps, {
+    app: release.app,
+    env: "verify",
+    kind: "verify",
+    releaseId: release.id,
+    commitSha: release.commitSha,
+    requestedBy,
+  });
+}
+
+/** A verify job passed: every release of its commit is verified. */
+export function markVerified(deps: Deps, job: JobRow): void {
+  if (!job.commitSha) return;
+  deps.db
+    .update(releases)
+    .set({ verifiedAt: iso(deps) })
+    .where(and(eq(releases.app, job.app), eq(releases.commitSha, job.commitSha), isNull(releases.verifiedAt)))
+    .run();
 }
 
 export function finishJob(

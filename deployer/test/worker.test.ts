@@ -79,10 +79,10 @@ describe("registration chain", () => {
     await registerApp(t.deps, "loan-tracker", "alice");
     await t.worker.tick();
     await finishRunning(t);
-    await finishRunning(t, "failed", () => true, { failStep: "test", error: "2 tests failed" });
+    await finishRunning(t, "failed", () => true, { failStep: "web-build", error: "Could not resolve ./App" });
     const json = appJson(t.deps, getApp(t.deps, "loan-tracker")!);
-    expect(json.error).toBe("2 tests failed");
-    expect(json.failedJob).toMatchObject({ kind: "build", failedStep: "test" });
+    expect(json.error).toBe("Could not resolve ./App");
+    expect(json.failedJob).toMatchObject({ kind: "build", failedStep: "web-build" });
     expect(json.recentJobs.map((j) => j.id)).toContain(json.failedJob!.id);
   });
 

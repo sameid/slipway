@@ -1,23 +1,27 @@
 #!/usr/bin/env bash
 # shellcheck source-path=SCRIPTDIR
-# build-release (design 5.6, docs/contracts.md): check one commit of an app and,
-# in release mode, publish its API image and frontend build. The runner calls it
-# once per phase, each time as a different user:
+# build-release (design 5.6, docs/contracts.md): one commit of an app, in one of
+# three modes. The runner calls it once per phase, each time as a different user:
 #
 #   prepare  runner       unpack the source zip into $SLIPWAY_WORK/src, validate app.yaml,
 #                         open the work dir to the build user
-#   verify   build user   secret scan, npm ci, type check, lint, tests, migrations check,
-#                         frontend build (no AWS credentials; runs the app's own code)
-#   image    runner       docker build of api/Dockerfile
+#   verify   build user   (no AWS credentials; runs the app's own code)
+#                           check:   secret scan
+#                           release: secret scan, npm ci, migrations check, frontend build
+#                           verify:  npm ci, type check, lint, tests
+#   image    runner       (release mode) docker build of api/Dockerfile
 #   publish  runner       (release mode, AWS_PROFILE=slipway-publish) push the image,
 #                         upload web.tgz and app.yaml to releases/<app>/<sha>/
 #
-# Inputs (env): APP, COMMIT_SHA, MODE (release | check), PR_NUMBER (check only),
-#   VERIFIED_BY_CHECK (release only: the id of a passed check of the same Git
-#   tree; verify then skips what that check already ran on this exact code),
-#   SLIPWAY_WORK, SLIPWAY_IMAGE (local tag), SLIPWAY_SOURCE_ZIP (prepare),
-#   RELEASES_BUCKET and AWS_ACCOUNT_ID (publish), SLIPWAY_SHARE_WORK=1 when the
-#   verify phase runs as a separate build user.
+# A PR's check (MODE=check) only stops what must never reach main; the release
+# build (MODE=release) builds what staging runs. Type check, lint and tests run
+# when someone verifies a release on the dashboard (MODE=verify), which prod
+# requires before it takes the release.
+#
+# Inputs (env): APP, COMMIT_SHA, MODE (release | check | verify), PR_NUMBER
+#   (check only), SLIPWAY_WORK, SLIPWAY_IMAGE (local tag), SLIPWAY_SOURCE_ZIP
+#   (prepare), RELEASES_BUCKET and AWS_ACCOUNT_ID (publish),
+#   SLIPWAY_SHARE_WORK=1 when the verify phase runs as a separate build user.
 #
 # Sharing the work dir: only the runner and the build user can reach it (the
 # runner's ACLs), so its "other" permission bits are the build user's. prepare
@@ -31,13 +35,10 @@ source "$(dirname "$0")/lib.sh"
 PHASE="${1:-}"
 require_env APP COMMIT_SHA MODE SLIPWAY_WORK
 case "$MODE" in
-  release | check) ;;
-  *) die "MODE must be release or check, not '$MODE'" ;;
+  release | check | verify) ;;
+  *) die "MODE must be release, check or verify, not '$MODE'" ;;
 esac
 [[ "$APP" =~ ^[a-z][a-z0-9-]{1,18}[a-z0-9]$ ]] || die "invalid APP '$APP'"
-if [[ -n "${VERIFIED_BY_CHECK:-}" ]]; then
-  [[ "$MODE" == release && "$VERIFIED_BY_CHECK" =~ ^[0-9]+$ ]] || die "VERIFIED_BY_CHECK is a check's job id, for release mode only"
-fi
 SRC="$SLIPWAY_WORK/src"
 IMAGE="${SLIPWAY_IMAGE:-slipway-local/app-$APP:${COMMIT_SHA:0:12}}"
 
@@ -52,7 +53,7 @@ case "$PHASE" in
   prepare)
     require_env SLIPWAY_SOURCE_ZIP
     reset_exports
-    echo "app $APP, commit $COMMIT_SHA, mode $MODE${PR_NUMBER:+, PR #$PR_NUMBER}${VERIFIED_BY_CHECK:+, same code as check #$VERIFIED_BY_CHECK}"
+    echo "app $APP, commit $COMMIT_SHA, mode $MODE${PR_NUMBER:+, PR #$PR_NUMBER}"
     step prepare
     require_tools unzip node
     rm -rf "$SRC" "$SLIPWAY_WORK/unpack"
@@ -83,58 +84,71 @@ case "$PHASE" in
       trap 'rc=$?; chmod -R a+rX "$SRC" 2>/dev/null || true; (exit "$rc"); _on_exit' EXIT
     fi
     cd "$SRC"
-    BUILD_COMMAND=$(appyaml get "$(app_yaml)" web.build_command)
-    OUTPUT_DIR=$(appyaml get "$(app_yaml)" web.output_dir)
 
-    step secret-scan
-    find_gitleaks
-    if ((${#GITLEAKS[@]})); then
-      # Our config, no ignore files and no gitleaks:allow comments, so a repo
-      # can't switch the scan off. gitleaks always reads .gitleaksignore from the
-      # scanned folder, so those are deleted from this throwaway copy.
-      if [[ -z "$DEV" ]]; then
-        find . -name .gitleaksignore -type f -delete
-      elif [[ -n "$(find . -name .gitleaksignore -not -path '*/node_modules/*' -print -quit)" ]]; then
-        echo "warning: .gitleaksignore is honoured in dev mode but ignored on the platform"
+    # Before anything merges or is published. Verify mode reads code that
+    # already passed it, so it skips the scan.
+    if [[ "$MODE" != verify ]]; then
+      step secret-scan
+      find_gitleaks
+      if ((${#GITLEAKS[@]})); then
+        # Our config, no ignore files and no gitleaks:allow comments, so a repo
+        # can't switch the scan off. gitleaks always reads .gitleaksignore from the
+        # scanned folder, so those are deleted from this throwaway copy.
+        if [[ -z "$DEV" ]]; then
+          find . -name .gitleaksignore -type f -delete
+        elif [[ -n "$(find . -name .gitleaksignore -not -path '*/node_modules/*' -print -quit)" ]]; then
+          echo "warning: .gitleaksignore is honoured in dev mode but ignored on the platform"
+        fi
+        config="$JOBS_DIR/gitleaks.toml"
+        [[ "${GITLEAKS[0]}" != docker ]] || config=/gitleaks.toml
+        "${GITLEAKS[@]}" dir --config "$config" --ignore-gitleaks-allow \
+          --redact --no-banner --no-color --verbose --exit-code 1 . ||
+          die "gitleaks found what looks like a committed secret (redacted above). Remove it from the code, rotate it, declare its name in app.yaml and set the value with /secret set."
+      else
+        echo "warning: neither gitleaks nor Docker is available; secret scan skipped (dev mode only)"
       fi
-      config="$JOBS_DIR/gitleaks.toml"
-      [[ "${GITLEAKS[0]}" != docker ]] || config=/gitleaks.toml
-      "${GITLEAKS[@]}" dir --config "$config" --ignore-gitleaks-allow \
-        --redact --no-banner --no-color --verbose --exit-code 1 . ||
-        die "gitleaks found what looks like a committed secret (redacted above). Remove it from the code, rotate it, declare its name in app.yaml and set the value with /secret set."
-    else
-      echo "warning: neither gitleaks nor Docker is available; secret scan skipped (dev mode only)"
     fi
 
-    step npm-ci
-    npm ci --no-audit --no-fund
+    case "$MODE" in
+      check)
+        echo "check passed for $APP at $COMMIT_SHA"
+        ;;
 
-    if [[ -n "${VERIFIED_BY_CHECK:-}" ]]; then
-      # The deployer found that check #N passed a commit with this exact Git
-      # tree (a squash merge of an up-to-date PR), so these would only repeat
-      # it. The secret scan above is cheap and stays.
-      step verified
-      echo "type check, lint, tests and migrations check skipped: check #$VERIFIED_BY_CHECK passed this exact code"
-    else
-      step typecheck
-      npm run typecheck
+      verify)
+        step npm-ci
+        npm ci --no-audit --no-fund
 
-      step lint
-      npm run lint
+        step typecheck
+        npm run typecheck
 
-      step test
-      npm test
+        step lint
+        npm run lint
 
-      step migrations-check
-      npm run db:check -w api
-    fi
+        step test
+        npm test
+        echo "verified $APP at $COMMIT_SHA"
+        ;;
 
-    step web-build
-    bash -c "$BUILD_COMMAND"
-    [[ -f "$OUTPUT_DIR/index.html" ]] || die "$OUTPUT_DIR/index.html is missing after '$BUILD_COMMAND' (web.output_dir in app.yaml)"
+      release)
+        BUILD_COMMAND=$(appyaml get "$(app_yaml)" web.build_command)
+        OUTPUT_DIR=$(appyaml get "$(app_yaml)" web.output_dir)
+
+        step npm-ci
+        npm ci --no-audit --no-fund
+
+        # Cheap, and a migration that collides would fail the deploy's migrate step.
+        step migrations-check
+        npm run db:check -w api
+
+        step web-build
+        bash -c "$BUILD_COMMAND"
+        [[ -f "$OUTPUT_DIR/index.html" ]] || die "$OUTPUT_DIR/index.html is missing after '$BUILD_COMMAND' (web.output_dir in app.yaml)"
+        ;;
+    esac
     ;;
 
   image)
+    [[ "$MODE" == release ]] || die "image only runs in release mode"
     require_tools docker
     cd "$SRC"
     check_links "$SRC" "the repo"
@@ -144,9 +158,6 @@ case "$PHASE" in
     # BuildKit would otherwise add a provenance attestation, turning the image into an index.
     if docker buildx version >/dev/null 2>&1; then build_flags+=(--provenance=false); fi
     docker build "${build_flags[@]}" .
-    if [[ "$MODE" == check ]]; then
-      echo "check passed for $APP at $COMMIT_SHA"
-    fi
     ;;
 
   publish)

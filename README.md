@@ -1,6 +1,6 @@
 # slipway
 
-A Claude Code plugin that builds and ships apps on your own AWS and GitHub accounts. Install it, run `/setup` once, and slipway sets itself up in your AWS account. Then `/new-app` gives you a GitHub repo and a live staging link a few minutes later. After that you describe features, and `/ship` opens a pull request that merges and deploys to staging once its check passes. You promote staging to prod from the deployer dashboard.
+A Claude Code plugin that builds and ships apps on your own AWS and GitHub accounts. Install it, run `/setup` once, and slipway sets itself up in your AWS account. Then `/new-app` gives you a GitHub repo and a live staging link a few minutes later. After that you describe features, and `/ship` opens a pull request that merges and deploys to staging once a quick check passes (app.yaml and a secret scan). On the deployer dashboard you verify a release (type check, lint and tests) and promote it to prod.
 
 Everything runs in **your AWS account** and creates repos under **your GitHub org or personal account**. There's no slipway service in between and nothing to sign up for.
 

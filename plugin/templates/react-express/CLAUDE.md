@@ -8,15 +8,16 @@ An app on the slipway platform: React, TanStack Query, HeroUI and Tailwind (Vite
 
 - Every feature, fix or enhancement gets its own git worktree and branch (the `coding-agent` skill sets this up). Never work in the main checkout; it stays on `main`.
 - Finish with `/ship`. It commits, rebases onto `main`, opens or updates the PR and tells the user it's submitted, without waiting; the deployer merges it once its check passes and deploys staging. Never push to `main`.
-- There's no local database and the app isn't run locally. Check your work with tests, typecheck and lint; the user previews it on staging once the PR has merged.
+- There's no local database and the app isn't run locally. Check your work with tests and typecheck; the user previews it on staging once the PR has merged.
 - Add or update tests with every change (Vitest: see `api/src/app.test.ts` and `web/src/App.test.tsx`). Tests never touch a database: mock `./db/client.js` the way `api/src/app.test.ts` does.
-- Before shipping, run `npm run typecheck`, `npm run lint` and `npm test`, plus `npm run db:check -w api` if the schema changed. The PR check runs the same commands, a secret scan, the Docker build and the frontend build. A failing check blocks the merge.
+- Before shipping, run `npm run typecheck` and the tests for what you changed, plus `npm run db:check -w api` if the schema changed. So staging updates fast, the PR check only validates `app.yaml` and scans for secrets, and the release build adds the migrations check and the builds.
+- Lint and the full test suite run when someone presses Verify on a release in the deployer dashboard. Prod only takes verified releases, so a failure there blocks Promote until a fix ships: read the verify job's log (`slipway jobs`, `slipway log <id>`), run `npm run lint` and `npm test`, and `/ship` the fix.
 
 ## Commands
 
 | Command | What it does |
 |---|---|
-| `npm test`, `npm run typecheck`, `npm run lint` | What the PR check runs |
+| `npm test`, `npm run typecheck`, `npm run lint` | What Verify runs before a release can go to prod |
 | `npm run db:generate -w api` | Write a migration after changing `api/src/db/schema.ts` |
 | `npm run db:check -w api` | Check that migrations don't collide |
 

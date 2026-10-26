@@ -41,7 +41,8 @@ These apps run on the slipway platform. Every merge to `main` deploys to staging
 ## Tests and checks
 
 - Every change comes with tests (Vitest in both packages; `supertest` for API routes, Testing Library for components). Tests never touch a database: mock `./db/client.js` as `api/src/app.test.ts` does.
-- Before `/ship`, run `npm run typecheck`, `npm run lint`, `npm test`, and `npm run db:check -w api` if migrations changed. The PR check runs these plus a secret scan, the Docker build and the frontend build.
+- Before `/ship`, run `npm run typecheck`, the tests for what you changed (`npx vitest run <files>` in `api` or `web`), and `npm run db:check -w api` if migrations changed. To get changes to staging fast, the PR check only validates `app.yaml` and scans for secrets, and the release build adds the migrations check, the frontend build and the Docker build.
+- Lint and the full test suite run when someone presses Verify on a release on the deployer dashboard. Prod only takes verified releases, so a failure there blocks Promote until a fix ships. To fix one, read the verify job's log (`slipway jobs`, then `slipway log <id>`), run `npm run lint` and `npm test` locally, and `/ship` the fix.
 
 ## Third-party keys
 
@@ -51,5 +52,5 @@ These apps run on the slipway platform. Every merge to `main` deploys to staging
 
 ## No local running
 
-- Apps don't run on the laptop: there's no local database, dev server or `.env`. Check work with tests, typecheck and lint, and the user previews it on staging once the PR `/ship` opened has merged.
+- Apps don't run on the laptop: there's no local database, dev server or `.env`. Check work with tests and typecheck, and the user previews it on staging once the PR `/ship` opened has merged.
 - Work on features in a worktree (the `coding-agent` skill), and finish with `/ship`.

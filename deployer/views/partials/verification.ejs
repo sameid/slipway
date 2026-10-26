@@ -1,0 +1,3 @@
+<%# A release's type check, lint and tests (jobs.ts verification()): a badge and the verify job. %>
+<%- include("badge", { status: { verified: "verified", verifying: "verifying", failed: "verify_failed", unverified: "not_verified" }[v.state] }) %>
+<% if (v.job) { %><a class="link text-xs" href="/apps/<%= app.name %>/jobs/<%= v.job.id %>">job #<%= v.job.id %></a><% } %>

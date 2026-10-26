@@ -8,7 +8,7 @@ import { ago, CliError, clock, EXIT, print, printJson, run, shortSha, sleep } fr
 const PHASES = {
   registering: "Registering the app and protecting its main branch",
   deploying_shared: "Creating the app's container registry and logs",
-  building: "Building the first release: install, type check, lint, tests, Docker image, frontend",
+  building: "Building the first release: install, migrations check, frontend, Docker image",
   deploying_staging: "Creating staging: database, API service, CDN (the first deploy takes 10-15 minutes, mostly the database)",
   live: "Staging is live",
   failed: "Setup failed",
@@ -60,7 +60,7 @@ async function logTail(job, lines = 60) {
 }
 
 function describeJob(job) {
-  const target = job.kind === "check" ? `check of PR #${job.prNumber}` : job.kind === "build" ? "build" : `${job.kind} ${job.env}`;
+  const target = job.kind === "check" ? `check of PR #${job.prNumber}` : job.kind === job.env ? job.kind : `${job.kind} ${job.env}`;
   return `${target} ${shortSha(job.commitSha)} ${job.status}`;
 }
 
@@ -117,7 +117,7 @@ export async function waitPr(opts, [number = opts.pr] = []) {
         show("unknown", `Waiting for the deployer to pick up PR #${number}${head ? ` at ${shortSha(head)}` : ""}`);
         break;
       case "checking":
-        show(`checking|${pr.check?.status}|${pr.note}`, `Check ${pr.check?.status ?? "queued"} for ${shortSha(pr.headSha)}: install, type check, lint, tests, Docker and frontend builds${note}`);
+        show(`checking|${pr.check?.status}|${pr.note}`, `Check ${pr.check?.status ?? "queued"} for ${shortSha(pr.headSha)}: app.yaml and secret scan${note}`);
         break;
       case "merged": {
         const deploy = pr.deploy ? `staging deploy ${pr.deploy.status}` : "building the release";
@@ -156,7 +156,9 @@ function envLine(label, env, dashboardUrl) {
     return `${label} not deployed yet${label.startsWith("Prod") ? ` (promote from the dashboard: ${dashboardUrl})` : ""}`;
   }
   const last = env.lastDeploy ? `, last deploy ${env.lastDeploy.status} ${ago(env.lastDeploy.finishedAt ?? env.lastDeploy.createdAt)}` : "";
-  return `${label} ${env.url ?? "(no URL yet)"}  release ${env.release.shortSha}${last}`;
+  // Type check, lint and tests haven't run on it; prod won't take it until they pass.
+  const unverified = env.release.verified === false ? " (not verified: press Verify on the dashboard before promoting)" : "";
+  return `${label} ${env.url ?? "(no URL yet)"}  release ${env.release.shortSha}${unverified}${last}`;
 }
 
 export async function status(opts) {

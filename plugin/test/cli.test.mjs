@@ -298,6 +298,15 @@ describe("against a mock deployer", () => {
     assert.match(r.stdout, /Prod: +not deployed yet/);
   });
 
+  test("status says when staging's release isn't verified for prod", async () => {
+    const a = app();
+    a.staging.release = { ...a.staging.release, verified: false };
+    state.apps = { "loan-tracker": a };
+    const r = await runCli(["status", "--app", "loan-tracker"], { env: env() });
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stdout, /release a1b2c3d \(not verified: press Verify on the dashboard before promoting\)/);
+  });
+
   test("jobs and log", async () => {
     const jobs = await runCli(["jobs"], { cwd: repo, env: env() });
     assert.equal(jobs.code, 0, jobs.stderr);

@@ -23,7 +23,7 @@ The main checkout stays on `main` as a clean starting point. Every task gets its
 
    If the user already has uncommitted changes in the main checkout that belong to this task, move them: `git stash` in the main checkout, create the worktree, then `git stash pop` inside it.
 4. **Work only inside the worktree.** `cd` into the path the script printed and stay there: every edit, test and generated migration happens in that folder. Use absolute paths under the worktree when editing files.
-5. **Build it properly.** Follow the `slipway-stack` conventions and the app's `CLAUDE.md`. Add tests. Run `npm run typecheck`, `npm run lint` and `npm test` before shipping, plus `npm run db:check -w api` if you changed the schema. Don't try to run the app or a database locally; there isn't one.
+5. **Build it properly.** Follow the `slipway-stack` conventions and the app's `CLAUDE.md`. Add tests, and run the ones for what you changed (`npx vitest run <files>` in `api` or `web`) and `npm run typecheck` as you go, plus `npm run db:check -w api` if you changed the schema. Lint and the full suite run when the release is verified for prod, so don't wait on them to ship. Don't try to run the app or a database locally; there isn't one.
 6. **Ship it** with `/ship` from inside the worktree. It commits, rebases onto `main`, opens the PR and tells the user it's submitted, without waiting: the deployer merges it and staging updates a few minutes later. Tell them what to try on staging once it's live.
 
 ## Several tasks in one request

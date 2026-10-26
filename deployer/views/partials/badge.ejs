@@ -1,1 +1,1 @@
-<span class="chip chip--soft chip--sm chip--<%= tone(status) %>"><% if (status === "running" || status === "checking") { %><span class="me-0.5 size-1.5 animate-pulse rounded-full bg-current"></span><% } %><span class="chip__label"><%= String(status).replace(/_/g, " ") %></span></span>
+<span class="chip chip--soft chip--sm chip--<%= tone(status) %>"><% if (["running", "checking", "verifying"].includes(status)) { %><span class="me-0.5 size-1.5 animate-pulse rounded-full bg-current"></span><% } %><span class="chip__label"><%= String(status).replace(/_/g, " ") %></span></span>

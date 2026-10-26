@@ -3,8 +3,9 @@
 //
 // build-release runs jobs/build-release.sh once per phase:
 //   prepare  as the runner      unpack the source, validate app.yaml, open work/ to the build user
-//   verify   as the build user  (sudo, clean environment, no AWS credentials) npm ci, checks, tests
-//   image    as the runner      docker build
+//   verify   as the build user  (sudo, clean environment, no AWS credentials) secret scan,
+//                               npm ci, and the mode's checks or frontend build
+//   image    as the runner      docker build (release mode only)
 //   publish  as the runner      with AWS credentials (release mode only)
 // deploy-env runs jobs/deploy-env.sh as the runner with AWS credentials.
 // On the instance those are the instance role's, unless RUNNER_PUBLISH_PROFILE /
@@ -32,7 +33,7 @@ import { RunStore, type RunRecord } from "./store.js";
 
 /** Inputs each kind accepts (contracts: build-release and deploy-env). Anything else is refused. */
 export const INPUTS: Record<RunKind, string[]> = {
-  "build-release": ["APP", "COMMIT_SHA", "MODE", "PR_NUMBER", "VERIFIED_BY_CHECK"],
+  "build-release": ["APP", "COMMIT_SHA", "MODE", "PR_NUMBER"],
   "deploy-env": [
     "APP", "ENV", "ACTION", "COMMIT_SHA", "IMAGE_DIGEST", "WEB_ARTIFACT", "DEPLOY_ID",
     "CUSTOM_DOMAIN", "CERTIFICATE_ARN", // only when the env has a custom domain
@@ -175,9 +176,11 @@ export class Runner {
     const phases: Phase[] = [
       { name: "prepare", asBuildUser: false },
       { name: "verify", asBuildUser: true },
-      { name: "image", asBuildUser: false },
     ];
-    if (run.env.MODE === "release") phases.push({ name: "publish", asBuildUser: false, aws: "publish" });
+    // Checks and verify runs build nothing to keep.
+    if (run.env.MODE === "release") {
+      phases.push({ name: "image", asBuildUser: false }, { name: "publish", asBuildUser: false, aws: "publish" });
+    }
     return phases;
   }
 

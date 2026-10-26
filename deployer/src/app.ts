@@ -50,10 +50,10 @@ export function duration(seconds: number): string {
 
 /** The HeroUI colour a status chip gets. */
 export function tone(status: string): "success" | "danger" | "warning" | "accent" | "default" {
-  if (["succeeded", "active", "ready", "merged", "handled"].includes(status)) return "success";
-  if (["failed", "check_failed", "rejected"].includes(status)) return "danger";
-  if (["blocked", "destroy_requested", "destroying", "removing"].includes(status)) return "warning";
-  if (["running", "checking", "building", "registering", "requesting", "validating", "attaching"].includes(status)) return "accent";
+  if (["succeeded", "active", "ready", "merged", "handled", "verified"].includes(status)) return "success";
+  if (["failed", "check_failed", "rejected", "verify_failed"].includes(status)) return "danger";
+  if (["blocked", "destroy_requested", "destroying", "removing", "not_verified"].includes(status)) return "warning";
+  if (["running", "checking", "verifying", "building", "registering", "requesting", "validating", "attaching"].includes(status)) return "accent";
   return "default"; // queued, superseded, ignored, closed, destroyed
 }
 
