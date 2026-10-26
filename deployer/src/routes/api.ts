@@ -8,7 +8,7 @@ import { iso, type Deps } from "../deps.js";
 import { apps, jobs, secretLinks, type AppRow } from "../db/schema.js";
 import { ApiError } from "../errors.js";
 import { getApp, getJob } from "../jobs.js";
-import { isAppEnv, SECRET_KEY } from "../names.js";
+import { isAppEnv } from "../names.js";
 import { registerApp } from "../registration.js";
 import { canSetSecrets, createLink, linkState, secretStatuses } from "../secrets.js";
 import { appJson, jobJson, pullJson } from "../serialize.js";
@@ -137,7 +137,6 @@ export function apiRoutes(deps: Deps): express.Router {
       const env = param(req, "env");
       const key = param(req, "key");
       if (!isAppEnv(env)) throw new ApiError(400, "env must be staging or prod");
-      if (!SECRET_KEY.test(key)) throw new ApiError(400, "Secret names look like STRIPE_KEY");
       if (!canSetSecrets(app)) throw new ApiError(409, `${app.name} is ${app.status}`);
       res.status(201).json(await createLink(deps, app, env, key, req.login!));
     }),
@@ -157,6 +156,8 @@ export function apiRoutes(deps: Deps): express.Router {
       res.json({
         status: linkState(deps, link),
         usedAt: link.usedAt,
+        // false: saved with "Save only", so nothing was deployed.
+        deployRequested: link.deployRequested ?? true,
         redeploy: redeploy ? jobJson(deps, redeploy) : null,
       });
     }),

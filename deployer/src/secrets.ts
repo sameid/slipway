@@ -1,46 +1,141 @@
 // App secrets (design 5.8). Values go straight from a browser form to Parameter
-// Store; the deployer stores only who set which name and when.
+// Store; the deployer stores only who set which name and when. Parameter Store
+// decides what an environment gets: every deploy injects all of its parameters
+// (jobs/deploy-env.sh), so a name needn't be in app.yaml first. Names under
+// secrets: in app.yaml are the required ones, which a deploy checks are set.
+// Saving can leave the deploy for later ("Save only"); removing always waits
+// for a deploy that leaves the secret out, and deletes it once that succeeds.
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { and, eq, isNull } from "drizzle-orm";
+import { and, desc, eq, inArray, isNotNull, isNull } from "drizzle-orm";
 import { parseAppYaml, type AppYaml } from "./appyaml.js";
 import { iso, type Deps } from "./deps.js";
-import { secretLinks, secrets, type AppRow, type JobRow, type SecretLinkRow } from "./db/schema.js";
+import { jobs, secretLinks, secrets, type AppRow, type JobRow, type SecretLinkRow } from "./db/schema.js";
 import { ApiError } from "./errors.js";
-import { queueRedeploy } from "./jobs.js";
-import { secretParameter, type AppEnv } from "./names.js";
+import { getRelease, queueRedeploy } from "./jobs.js";
+import { MAX_SECRETS, secretNameProblem, secretParameter, type AppEnv } from "./names.js";
 
 export const LINK_TTL_MS = 10 * 60_000;
 const MAX_VALUE_BYTES = 4096; // Parameter Store standard tier
+// The runner takes inputs of at most 512 characters; removals past that wait for the next deploy.
+const MAX_REMOVED_INPUT = 512;
+
+export const listing = (names: string[]) => (names.length > 1 ? `${names.slice(0, -1).join(", ")} and ${names.at(-1)}` : (names[0] ?? ""));
 
 const manifests = new Map<string, AppYaml>();
 
-/** app.yaml on main, cached per commit. */
-export async function mainAppYaml(deps: Deps, app: AppRow): Promise<AppYaml> {
-  const head = await deps.github.branchHead(app.repo, "main");
-  const cacheKey = `${app.repo}@${head}`;
+/** app.yaml at a commit, cached. */
+async function appYamlAt(deps: Deps, app: AppRow, sha: string): Promise<AppYaml> {
+  const cacheKey = `${app.repo}@${sha}`;
   const cached = manifests.get(cacheKey);
   if (cached) return cached;
-  const text = await deps.github.readFile(app.repo, "app.yaml", head);
-  if (text === null) throw new ApiError(409, "app.yaml is missing on main");
+  const text = await deps.github.readFile(app.repo, "app.yaml", sha);
+  if (text === null) throw new ApiError(409, `app.yaml is missing at ${sha.slice(0, 7)}`);
   const manifest = parseAppYaml(text);
   if (manifests.size > 500) manifests.clear();
   manifests.set(cacheKey, manifest);
   return manifest;
 }
 
-export type SecretStatus = { set: boolean; lastSetBy: string | null; lastSetAt: string | null };
+/** app.yaml on main, cached per commit. */
+export async function mainAppYaml(deps: Deps, app: AppRow): Promise<AppYaml> {
+  return appYamlAt(deps, app, await deps.github.branchHead(app.repo, "main"));
+}
 
-export async function secretStatuses(
-  deps: Deps,
-  app: AppRow,
-): Promise<{ key: string; staging: SecretStatus; prod: SecretStatus }[]> {
+/**
+ * Names a deploy of `env` requires: app.yaml's on main, and the ones of the
+ * release the environment runs, since redeploying it checks them too.
+ */
+async function requiredNames(deps: Deps, app: AppRow, env: AppEnv): Promise<Set<string>> {
+  const names = new Set((await mainAppYaml(deps, app)).secrets);
+  const running = getRelease(deps, env === "staging" ? app.stagingReleaseId : app.prodReleaseId);
+  if (running) for (const key of (await appYamlAt(deps, app, running.commitSha)).secrets) names.add(key);
+  return names;
+}
+
+export type SecretStatus = {
+  /** A value exists in Parameter Store. */
+  set: boolean;
+  lastSetBy: string | null;
+  lastSetAt: string | null;
+  /** Saved after the environment's last deploy started, so the app doesn't have this value yet. */
+  notDeployed: boolean;
+  /** Marked for removal: the next deploy leaves it out, then it's deleted. */
+  removing: boolean;
+};
+
+export type SecretRow = {
+  key: string;
+  /** Listed under secrets: in app.yaml on main, so deploys fail without it. */
+  required: boolean;
+  staging: SecretStatus;
+  prod: SecretStatus;
+};
+
+const deployedRelease = (app: AppRow, env: AppEnv) => (env === "staging" ? app.stagingReleaseId : app.prodReleaseId);
+
+/** When the environment's last successful deploy started; anything saved later isn't in use yet. */
+function lastDeployStart(deps: Deps, app: AppRow, env: AppEnv): string | null {
+  if (!deployedRelease(app, env)) return null;
+  const job = deps.db
+    .select({ startedAt: jobs.startedAt })
+    .from(jobs)
+    .where(and(eq(jobs.app, app.name), eq(jobs.env, env), eq(jobs.kind, "deploy"), eq(jobs.status, "succeeded")))
+    .orderBy(desc(jobs.id))
+    .get();
+  return job?.startedAt ?? null;
+}
+
+/** Every secret either environment has, plus the required ones: app.yaml's order first, then by name. */
+export async function secretStatuses(deps: Deps, app: AppRow): Promise<SecretRow[]> {
   const { secrets: declared } = await mainAppYaml(deps, app);
+  const [staging, prod] = await Promise.all([
+    deps.platform.listAppSecrets(app.name, "staging"),
+    deps.platform.listAppSecrets(app.name, "prod"),
+  ]);
+  const existing = { staging: new Set(staging), prod: new Set(prod) };
+  const since = { staging: lastDeployStart(deps, app, "staging"), prod: lastDeployStart(deps, app, "prod") };
   const rows = deps.db.select().from(secrets).where(eq(secrets.app, app.name)).all();
+  const others = new Set([...staging, ...prod, ...rows.filter((r) => r.removeRequestedAt).map((r) => r.key)]);
+  const keys = [...declared, ...[...others].filter((k) => !declared.includes(k)).sort()];
   const status = (key: string, env: AppEnv): SecretStatus => {
     const row = rows.find((r) => r.key === key && r.env === env);
-    return { set: !!row?.lastSetAt, lastSetBy: row?.lastSetBy ?? null, lastSetAt: row?.lastSetAt ?? null };
+    const set = existing[env].has(key);
+    const removing = !!row?.removeRequestedAt;
+    const setAt = set ? (row?.lastSetAt ?? null) : null;
+    return {
+      set,
+      lastSetBy: set ? (row?.lastSetBy ?? null) : null,
+      lastSetAt: setAt,
+      notDeployed: !removing && !!setAt && !!since[env] && setAt > since[env]!,
+      removing,
+    };
   };
-  return declared.map((key) => ({ key, staging: status(key, "staging"), prod: status(key, "prod") }));
+  return keys.map((key) => ({ key, required: declared.includes(key), staging: status(key, "staging"), prod: status(key, "prod") }));
+}
+
+/** Throws if `names` would give the environment more secrets than a deploy takes. */
+async function checkRoom(deps: Deps, app: AppRow, env: AppEnv, adding: string[], removing: string[] = []): Promise<void> {
+  const { secrets: declared } = await mainAppYaml(deps, app);
+  const existing = await deps.platform.listAppSecrets(app.name, env);
+  const after = new Set([...declared, ...existing.filter((k) => !removing.includes(k)), ...adding]);
+  if (after.size > MAX_SECRETS) throw new ApiError(400, `An environment can have at most ${MAX_SECRETS} secrets; ${env} would have ${after.size}.`);
+}
+
+/** Throws if a deploy that leaves `key` out is running: it's deleted once that finishes. */
+function checkNotBeingRemoved(deps: Deps, app: string, env: AppEnv, keys: string[]): void {
+  if (!keys.length) return;
+  const busy = deps.db
+    .select()
+    .from(secrets)
+    .where(and(eq(secrets.app, app), eq(secrets.env, env), inArray(secrets.key, keys), isNotNull(secrets.removeJobId)))
+    .all();
+  if (busy.length) {
+    const names = busy.map((r) => r.key);
+    throw new ApiError(
+      409,
+      `Deploy job #${busy[0]!.removeJobId} is removing ${listing(names)} from ${env}. Set ${names.length > 1 ? "them" : "it"} again once it has finished.`,
+    );
+  }
 }
 
 export const hashToken = (token: string) => createHash("sha256").update(token).digest("hex");
@@ -53,9 +148,9 @@ export async function createLink(
   createdBy: string,
 ): Promise<{ url: string; linkId: string; expiresAt: string }> {
   const { secrets: declared } = await mainAppYaml(deps, app);
-  if (!declared.includes(key)) {
-    throw new ApiError(400, `${key} isn't declared under secrets: in app.yaml on main. Add it, ship that change, then set it.`);
-  }
+  const problem = secretNameProblem(key, declared.includes(key));
+  if (problem) throw new ApiError(400, `${problem}.`);
+  await checkRoom(deps, app, env, [key]);
   const token = randomBytes(32).toString("base64url");
   const linkId = randomBytes(9).toString("base64url");
   const expiresAt = new Date(deps.now().getTime() + LINK_TTL_MS).toISOString();
@@ -85,25 +180,36 @@ export function findLink(deps: Deps, token: string): SecretLinkRow | undefined {
 
 const tooLong = (value: string) => Buffer.byteLength(value) > MAX_VALUE_BYTES;
 
-/** Write one parameter and record who set it. The caller queues the redeploy. */
+/** Write one parameter and record who set it; setting a value also cancels its removal. The caller deploys. */
 async function writeSecret(deps: Deps, app: string, env: AppEnv, key: string, value: string, by: string): Promise<void> {
   await deps.platform.putAppSecret(secretParameter(app, env, key), value);
   const now = iso(deps);
+  const set = { lastSetBy: by, lastSetAt: now, removeRequestedBy: null, removeRequestedAt: null, removeJobId: null };
   deps.db
     .insert(secrets)
-    .values({ app, env, key, lastSetBy: by, lastSetAt: now })
-    .onConflictDoUpdate({ target: [secrets.app, secrets.env, secrets.key], set: { lastSetBy: by, lastSetAt: now } })
+    .values({ app, env, key, ...set })
+    .onConflictDoUpdate({ target: [secrets.app, secrets.env, secrets.key], set })
     .run();
 }
 
-/** Use a one-time link: write the parameter, record it, and redeploy that environment. */
-export async function setSecret(deps: Deps, token: string, value: string): Promise<{ link: SecretLinkRow; redeploy: JobRow | null }> {
+/**
+ * Use a one-time link: write the parameter, record it, and with `deploy`
+ * redeploy that environment. Without it, the next deploy picks the value up.
+ */
+export async function setSecret(
+  deps: Deps,
+  token: string,
+  value: string,
+  deploy = true,
+): Promise<{ link: SecretLinkRow; redeploy: JobRow | null }> {
   const link = findLink(deps, token);
   if (!link) throw new ApiError(404, "This link isn't valid.");
   const state = linkState(deps, link);
   if (state !== "pending") throw new ApiError(410, state === "used" ? "This link has already been used." : "This link has expired.");
   if (!value) throw new ApiError(400, "Enter a value.");
   if (tooLong(value)) throw new ApiError(400, `Values can be at most ${MAX_VALUE_BYTES} bytes.`);
+  const env = link.env as AppEnv;
+  checkNotBeingRemoved(deps, link.app, env, [link.key]);
 
   // Claim the link first so two submissions can't both write.
   const now = iso(deps);
@@ -114,7 +220,6 @@ export async function setSecret(deps: Deps, token: string, value: string): Promi
     .run();
   if (claimed.changes !== 1) throw new ApiError(410, "This link has already been used.");
 
-  const env = link.env as AppEnv;
   try {
     await writeSecret(deps, link.app, env, link.key, value, link.createdBy);
   } catch (err) {
@@ -123,42 +228,62 @@ export async function setSecret(deps: Deps, token: string, value: string): Promi
     throw new ApiError(502, "Couldn't save the value. Try again; if it keeps failing, the deployer's log has the reason.");
   }
 
-  const redeploy = queueRedeploy(deps, link.app, env, link.createdBy);
+  const redeploy = deploy ? queueRedeploy(deps, link.app, env, link.createdBy) : null;
   deps.db
     .update(secretLinks)
-    .set({ redeployJobId: redeploy?.id ?? null })
+    .set({ redeployJobId: redeploy?.id ?? null, deployRequested: deploy })
     .where(eq(secretLinks.tokenHash, link.tokenHash))
     .run();
-  deps.log("secret set", { app: link.app, env, key: link.key, by: link.createdBy, redeploy: redeploy?.id });
-  return { link: { ...link, usedAt: now, redeployJobId: redeploy?.id ?? null }, redeploy };
+  deps.log("secret set", { app: link.app, env, key: link.key, by: link.createdBy, deploy, redeploy: redeploy?.id });
+  return { link: { ...link, usedAt: now, redeployJobId: redeploy?.id ?? null, deployRequested: deploy }, redeploy };
 }
 
 /** Whether values can be set for an app: not while it's being torn down. */
 export const canSetSecrets = (app: AppRow) => ["registering", "active", "failed"].includes(app.status);
 
-export type SetSecretsResult = { saved: string[]; failed: string[]; ignored: string[]; redeploy: JobRow | null };
+export type SecretsChange = {
+  /** New values by name; names the environment doesn't have yet are added. */
+  values: Map<string, string>;
+  /** Names to remove. */
+  remove: string[];
+  /** Redeploy the environment now ("Save and deploy"), or leave it to the next deploy ("Save only"). */
+  deploy: boolean;
+};
+
+export type SetSecretsResult = {
+  saved: string[];
+  failed: string[];
+  /** Marked for removal, or, if the environment was never deployed, deleted already. */
+  removed: string[];
+  redeploy: JobRow | null;
+  /** Whether the environment has been deployed; if not, its first deploy uses what was saved. */
+  deployed: boolean;
+};
 
 /**
- * Set several values for one environment at once (the dashboard's secrets page),
- * then redeploy it once. Names that app.yaml on main doesn't declare are ignored
- * and reported back; nothing is written unless every value is valid.
+ * Change several of one environment's secrets at once (the dashboard's secrets
+ * page), then redeploy it once if `deploy`. Nothing is written unless every
+ * name and value is valid.
  */
-export async function setSecrets(
-  deps: Deps,
-  app: AppRow,
-  env: AppEnv,
-  values: Map<string, string>,
-  by: string,
-): Promise<SetSecretsResult> {
+export async function setSecrets(deps: Deps, app: AppRow, env: AppEnv, change: SecretsChange, by: string): Promise<SetSecretsResult> {
   if (!canSetSecrets(app)) throw new ApiError(409, `${app.name} is ${app.status.replace(/_/g, " ")}, so its secrets can't be changed.`);
+  const { values, remove, deploy } = change;
+  const keys = [...values.keys()];
+  if (!keys.length && !remove.length) throw new ApiError(400, "Enter at least one value.");
   const { secrets: declared } = await mainAppYaml(deps, app);
-  const ignored = [...values.keys()].filter((key) => !declared.includes(key));
-  const keys = declared.filter((key) => values.has(key));
-  if (!keys.length) {
-    throw new ApiError(400, ignored.length ? `None of those names are declared in app.yaml on main.` : "Enter at least one value.");
+  const problems = keys.map((key) => secretNameProblem(key, declared.includes(key))).filter((p): p is string => !!p);
+  if (problems.length) throw new ApiError(400, `${problems.join(". ")}. Nothing was saved.`);
+  const both = remove.filter((key) => values.has(key));
+  if (both.length) throw new ApiError(400, `${listing(both)} has a new value and is marked for removal; pick one. Nothing was saved.`);
+  const required = await requiredNames(deps, app, env);
+  const needed = remove.filter((key) => required.has(key));
+  if (needed.length) {
+    throw new ApiError(400, `${listing(needed)} ${needed.length > 1 ? "are" : "is"} required by app.yaml, so ${needed.length > 1 ? "they" : "it"} can't be removed. Nothing was saved.`);
   }
   const long = keys.filter((key) => tooLong(values.get(key)!));
   if (long.length) throw new ApiError(400, `Values can be at most ${MAX_VALUE_BYTES} bytes; ${long.join(", ")} ${long.length > 1 ? "are" : "is"} longer.`);
+  checkNotBeingRemoved(deps, app.name, env, [...keys, ...remove]);
+  await checkRoom(deps, app, env, keys, remove);
 
   const saved: string[] = [];
   const failed: string[] = [];
@@ -171,10 +296,112 @@ export async function setSecrets(
       deps.log("writing secret failed", { app: app.name, env, key, error: String(err) });
     }
   }
-  if (!saved.length) throw new ApiError(502, "Couldn't save any of the values. Try again, or check the deployer's log.");
-  const redeploy = queueRedeploy(deps, app.name, env, by);
-  deps.log("secrets set", { app: app.name, env, keys: saved, failed, by, redeploy: redeploy?.id });
-  return { saved, failed, ignored, redeploy };
+
+  const deployed = !!deployedRelease(app, env);
+  const removed: string[] = [];
+  for (const key of remove) {
+    try {
+      if (deployed) {
+        // The running tasks' definition still names it: it goes once a deploy has left it out.
+        const mark = { removeRequestedBy: by, removeRequestedAt: iso(deps), removeJobId: null };
+        deps.db
+          .insert(secrets)
+          .values({ app: app.name, env, key, ...mark })
+          .onConflictDoUpdate({ target: [secrets.app, secrets.env, secrets.key], set: mark })
+          .run();
+      } else {
+        await deps.platform.deleteAppSecret(secretParameter(app.name, env, key));
+        deps.db.delete(secrets).where(and(eq(secrets.app, app.name), eq(secrets.env, env), eq(secrets.key, key))).run();
+      }
+      removed.push(key);
+    } catch (err) {
+      failed.push(key);
+      deps.log("removing secret failed", { app: app.name, env, key, error: String(err) });
+    }
+  }
+  if (!saved.length && !removed.length) throw new ApiError(502, "Couldn't save any of the changes. Try again, or check the deployer's log.");
+  const redeploy = deploy && deployed ? queueRedeploy(deps, app.name, env, by) : null;
+  deps.log("secrets set", { app: app.name, env, keys: saved, removed, failed, by, deploy, redeploy: redeploy?.id });
+  return { saved, failed, removed, redeploy, deployed };
+}
+
+/** Changes saved but not deployed: redeploy what the environment runs. */
+export function deploySecrets(deps: Deps, app: AppRow, env: AppEnv, by: string): JobRow {
+  if (!["active", "failed"].includes(app.status)) throw new ApiError(409, `${app.name} is ${app.status.replace(/_/g, " ")}; it can't be deployed.`);
+  const job = queueRedeploy(deps, app.name, env, by);
+  if (!job) throw new ApiError(409, `${env} hasn't been deployed yet; its first deploy will use the saved values.`);
+  deps.log("secrets deploy", { app: app.name, env, by, job: job.id });
+  return job;
+}
+
+/** Take back a removal that no deploy has started on yet. */
+export function keepSecret(deps: Deps, app: AppRow, env: AppEnv, key: string): void {
+  const row = deps.db.select().from(secrets).where(and(eq(secrets.app, app.name), eq(secrets.env, env), eq(secrets.key, key))).get();
+  if (!row?.removeRequestedAt) throw new ApiError(400, `${key} isn't being removed from ${env}.`);
+  checkNotBeingRemoved(deps, app.name, env, [key]);
+  if (row.lastSetAt) {
+    deps.db
+      .update(secrets)
+      .set({ removeRequestedBy: null, removeRequestedAt: null, removeJobId: null })
+      .where(and(eq(secrets.app, app.name), eq(secrets.env, env), eq(secrets.key, key)))
+      .run();
+  } else {
+    deps.db.delete(secrets).where(and(eq(secrets.app, app.name), eq(secrets.env, env), eq(secrets.key, key))).run();
+  }
+}
+
+// --- Removals, through deploys (worker.ts) ---
+
+/** SECRETS_REMOVED for a deploy of `env`: the names it should leave out. */
+export function secretInputs(deps: Deps, app: string, env: AppEnv): { inputs: Record<string, string>; names: string[] } {
+  const rows = deps.db
+    .select({ key: secrets.key })
+    .from(secrets)
+    .where(and(eq(secrets.app, app), eq(secrets.env, env), isNotNull(secrets.removeRequestedAt)))
+    .orderBy(secrets.key)
+    .all();
+  const names: string[] = [];
+  for (const { key } of rows) {
+    if ([...names, key].join(":").length > MAX_REMOVED_INPUT) break;
+    names.push(key);
+  }
+  return { inputs: names.length ? { SECRETS_REMOVED: names.join(":") } : {}, names };
+}
+
+/** The deploy has started with `names` left out: it's the one that removes them. */
+export function secretsDeployStarted(deps: Deps, job: JobRow, env: AppEnv, names: string[]): void {
+  if (!names.length) return;
+  deps.db
+    .update(secrets)
+    .set({ removeJobId: job.id })
+    .where(and(eq(secrets.app, job.app), eq(secrets.env, env), inArray(secrets.key, names), isNotNull(secrets.removeRequestedAt)))
+    .run();
+}
+
+/**
+ * After a deploy: if it succeeded, the service no longer names the secrets it
+ * left out, so their parameters can go. If it failed, the next deploy tries again.
+ */
+export async function secretsDeployFinished(deps: Deps, job: JobRow, env: AppEnv, succeeded: boolean): Promise<void> {
+  const rows = deps.db
+    .select()
+    .from(secrets)
+    .where(and(eq(secrets.app, job.app), eq(secrets.env, env), eq(secrets.removeJobId, job.id)))
+    .all();
+  for (const row of rows) {
+    const where = and(eq(secrets.app, row.app), eq(secrets.env, row.env), eq(secrets.key, row.key), eq(secrets.removeJobId, job.id));
+    if (succeeded) {
+      try {
+        await deps.platform.deleteAppSecret(secretParameter(row.app, env, row.key));
+        deps.db.delete(secrets).where(where).run();
+        deps.log("secret removed", { app: row.app, env, key: row.key, job: job.id });
+        continue;
+      } catch (err) {
+        deps.log("deleting removed secret failed", { app: row.app, env, key: row.key, error: String(err) });
+      }
+    }
+    deps.db.update(secrets).set({ removeJobId: null }).where(where).run();
+  }
 }
 
 /**

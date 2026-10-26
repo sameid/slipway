@@ -8,7 +8,13 @@ import {
   RequestCertificateCommand,
 } from "@aws-sdk/client-acm";
 import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
-import { GetParameterCommand, PutParameterCommand, SSMClient } from "@aws-sdk/client-ssm";
+import {
+  DeleteParameterCommand,
+  DescribeParametersCommand,
+  GetParameterCommand,
+  PutParameterCommand,
+  SSMClient,
+} from "@aws-sdk/client-ssm";
 import { CloudWatchClient, PutMetricDataCommand } from "@aws-sdk/client-cloudwatch";
 import { PublishCommand, SNSClient } from "@aws-sdk/client-sns";
 
@@ -25,6 +31,10 @@ export type CertificateState = {
 export interface Platform {
   /** Write /apps/<app>/<env>/<KEY> as a SecureString. */
   putAppSecret(name: string, value: string): Promise<void>;
+  /** The KEYs under /apps/<app>/<env>/: names only, never values. */
+  listAppSecrets(app: string, env: "staging" | "prod"): Promise<string[]>;
+  /** Delete /apps/<app>/<env>/<KEY>; deleting one that's already gone is fine. */
+  deleteAppSecret(name: string): Promise<void>;
   /**
    * A deploy failed: count it in the slipway/FailedDeploys metric (the
    * foundation alarms on it) and, for prod, tell the dev team's SNS topic.
@@ -122,6 +132,33 @@ export class AwsPlatform implements Platform {
       }),
     );
   }
+
+  async listAppSecrets(app: string, env: "staging" | "prod"): Promise<string[]> {
+    const path = `/apps/${app}/${env}`;
+    const keys: string[] = [];
+    let NextToken: string | undefined;
+    do {
+      const out = await this.ssm.send(
+        new DescribeParametersCommand({
+          ParameterFilters: [{ Key: "Path", Option: "OneLevel", Values: [path] }],
+          MaxResults: 50,
+          NextToken,
+        }),
+      );
+      for (const p of out.Parameters ?? []) if (p.Name?.startsWith(`${path}/`)) keys.push(p.Name.slice(path.length + 1));
+      NextToken = out.NextToken;
+    } while (NextToken);
+    return keys.sort();
+  }
+
+  async deleteAppSecret(name: string): Promise<void> {
+    try {
+      await this.ssm.send(new DeleteParameterCommand({ Name: name }));
+    } catch (err) {
+      if ((err as { name?: string }).name !== "ParameterNotFound") throw err;
+    }
+  }
+
 }
 
 export async function getSecretJson<T>(client: SecretsManagerClient, id: string): Promise<T> {

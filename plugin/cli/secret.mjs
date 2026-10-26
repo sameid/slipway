@@ -1,4 +1,4 @@
-// /secret: list declared secrets, and hand out one-time browser links to set values.
+// /secret: list an app's secrets, and hand out one-time browser links to set values.
 // Values never pass through this CLI or the Claude Code conversation.
 import { spawn } from "node:child_process";
 import { appName } from "./app.mjs";
@@ -30,11 +30,16 @@ async function list(opts) {
   const name = appName(opts);
   const { secrets } = await api.get(`/api/apps/${name}/secrets`);
   if (opts.json) return printJson({ secrets });
-  if (!secrets.length) {
-    return print("No secrets are declared. Add names under secrets: in app.yaml (names only, never values).");
+  if (!secrets.length) return print("No secrets yet. Set one with: slipway secret set <KEY> --env staging|prod");
+  const cell = (s, required) => {
+    if (s.removing) return "being removed (on the next deploy)";
+    if (!s.set) return required ? "NOT SET (required: deploys fail until it's set)" : "not set";
+    const by = s.lastSetBy ? `set by ${s.lastSetBy} ${ago(s.lastSetAt)}` : "set";
+    return s.notDeployed ? `${by}, not deployed yet` : by;
+  };
+  for (const s of secrets) {
+    print(`${s.key}${s.required ? " (required by app.yaml)" : ""}`, `  staging: ${cell(s.staging, s.required)}`, `  prod:    ${cell(s.prod, s.required)}`);
   }
-  const cell = (s) => (s.set ? `set by ${s.lastSetBy ?? "?"} ${ago(s.lastSetAt)}` : "NOT SET");
-  for (const s of secrets) print(`${s.key}`, `  staging: ${cell(s.staging)}`, `  prod:    ${cell(s.prod)}`);
 }
 
 async function link(opts, [key], { wait }) {
@@ -43,8 +48,8 @@ async function link(opts, [key], { wait }) {
   if (!KEY_PATTERN.test(key ?? "")) throw new CliError(`Secret names are UPPER_SNAKE_CASE, like STRIPE_KEY.`, EXIT.USAGE);
   if (!ENVS.includes(env)) throw new CliError("Pass --env staging or --env prod.", EXIT.USAGE);
 
-  // The deployer checks the name against app.yaml on main, which is what deploys read.
-  // The local checkout may be behind main or ahead of it, so it isn't checked here.
+  // The deployer decides which names are allowed (any name, apart from the platform's
+  // own and a few only app.yaml may declare); app.yaml needn't list it first.
   const created = await api.post(`/api/apps/${name}/secrets/${env}/${key}/link`);
   if (opts.open) openInBrowser(created.url);
   if (opts.json && !wait) return printJson(created);
@@ -88,6 +93,12 @@ async function waitLink(opts, name, linkId) {
       };
       if (state.status === "expired") {
         return done(EXIT.FAILED, "The link expired before a value was entered. Create a new one with /secret set.");
+      }
+      if (state.status === "used" && !job && state.deployRequested === false) {
+        return done(
+          EXIT.OK,
+          "Value saved without deploying (Save only). It takes effect on that environment's next deploy, which Deploy on the app's secrets page in the dashboard can start.",
+        );
       }
       if (state.status === "used" && !job) {
         return done(EXIT.OK, "Value saved. That environment has no release yet, so it takes effect on its first deploy.");

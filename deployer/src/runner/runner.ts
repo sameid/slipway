@@ -36,6 +36,7 @@ export const INPUTS: Record<RunKind, string[]> = {
   "deploy-env": [
     "APP", "ENV", "ACTION", "COMMIT_SHA", "IMAGE_DIGEST", "WEB_ARTIFACT", "DEPLOY_ID",
     "CUSTOM_DOMAIN", "CERTIFICATE_ARN", // only when the env has a custom domain
+    "SECRETS_REMOVED", // only while secrets are being removed: KEY:KEY
   ],
 };
 

@@ -17,6 +17,7 @@ import {
   type JobRow,
 } from "./db/schema.js";
 import { domainDeployFinished, domainDeployStarted, domainInputs, domainsTornDown, pollDomains } from "./domains.js";
+import { secretInputs, secretsDeployFinished, secretsDeployStarted } from "./secrets.js";
 import { finishJob, getApp, getJob, getRelease } from "./jobs.js";
 import { CHECK_CONTEXT, deployContext, isAppEnv, shortSha, type AppEnv } from "./names.js";
 import { parseFailure, type RunInfo } from "./runs.js";
@@ -145,6 +146,7 @@ export class Worker {
     }
     if (job.kind === "deploy" && isAppEnv(job.env)) {
       domainDeployFinished(this.deps, job, job.env);
+      await secretsDeployFinished(this.deps, job, job.env, true);
       return this.onDeployed(app, job, job.env, exported.APP_URL);
     }
     // The env's distribution is gone, so its custom domain's certificate can go too.
@@ -238,6 +240,7 @@ export class Worker {
     if (job.kind === "deploy" && isAppEnv(job.env)) {
       const env = job.env;
       domainDeployFinished(this.deps, job, env);
+      await secretsDeployFinished(this.deps, job, env, false);
       try {
         await this.deps.platform.deployFailed({ app: app.name, env, summary: message, link: jobUrl(this.deps, job) });
       } catch (err) {
@@ -502,15 +505,18 @@ export class Worker {
     if (job.kind === "deploy" && isAppEnv(job.env)) {
       const release = getRelease(this.deps, job.releaseId);
       if (!release?.imageDigest || !release.webArtifact) throw new Error(`release #${job.releaseId} isn't ready`);
+      const removing = secretInputs(this.deps, app.name, job.env);
       Object.assign(env, {
         COMMIT_SHA: release.commitSha,
         IMAGE_DIGEST: release.imageDigest,
         WEB_ARTIFACT: release.webArtifact,
         ...domainInputs(this.deps, app.name, job.env),
+        ...removing.inputs,
       });
       const runId = await runs.start({ kind: "deploy-env", env });
       // Only once it has started: a deploy that couldn't start doesn't count against the domain.
       domainDeployStarted(this.deps, job, job.env);
+      secretsDeployStarted(this.deps, job, job.env, removing.names);
       return runId;
     }
     return runs.start({ kind: "deploy-env", env });

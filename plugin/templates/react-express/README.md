@@ -10,6 +10,6 @@ Ask Claude Code for a feature, fix or tweak. It works in its own worktree, so yo
 
 - `/status` shows what's on staging and prod.
 - Promote a staging release to prod from the deployer dashboard.
-- `/secret set <KEY> --env staging` gives you a one-time link to set an API key. Declare the name in `app.yaml` first.
+- `/secret set <KEY> --env staging` gives you a one-time link to set an API key; the deployer dashboard's secrets page sets several at once. Names the code needs go under `secrets:` in `app.yaml`, so a deploy without them fails early.
 
 See `CLAUDE.md` for the conventions Claude follows in this repo.

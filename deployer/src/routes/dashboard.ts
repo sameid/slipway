@@ -12,14 +12,22 @@ import { catchUpApp } from "../events.js";
 import { ACTIVE, enqueue, getApp, getJob, getRelease, queueDeploy, supersedeQueued } from "../jobs.js";
 import { ApiError } from "../errors.js";
 import { isAppEnv, shortSha, type AppEnv } from "../names.js";
-import { canSetSecrets, parseEnvFile, secretStatuses, setSecrets, type SetSecretsResult } from "../secrets.js";
+import {
+  canSetSecrets,
+  deploySecrets,
+  keepSecret,
+  listing,
+  parseEnvFile,
+  secretStatuses,
+  setSecrets,
+  type SetSecretsResult,
+} from "../secrets.js";
 import { jobLog } from "./api.js";
 import { requireAdmin, requireUser } from "./auth.js";
 
 const param = (req: Request, name: string) => String(req.params[name] ?? "");
 
 /** "A", "A and B", "A, B and C". */
-const listing = (names: string[]) => (names.length > 1 ? `${names.slice(0, -1).join(", ")} and ${names.at(-1)}` : (names[0] ?? ""));
 
 function notFound(res: Response, what: string): void {
   res.status(404).render("message", { title: "Not found", message: `${what} doesn't exist.` });
@@ -178,7 +186,7 @@ export function dashboardRoutes(deps: Deps): express.Router {
         try {
           secretRows = await secretStatuses(deps, app);
         } catch (err) {
-          secretError = `Couldn't read app.yaml from GitHub: ${(err as Error).message}`;
+          secretError = `Couldn't read the secrets: ${(err as Error).message}`;
         }
       }
       view.secrets = secretRows;
@@ -262,7 +270,7 @@ export function dashboardRoutes(deps: Deps): express.Router {
     res.redirect(`/apps/${app.name}`);
   });
 
-  // --- Secrets: set several values for one environment, with one redeploy ------
+  // --- Secrets: change several of one environment's at once, deploying now or later ---
 
   async function renderSecrets(res: Response, app: AppRow, env: AppEnv, error: string | null, status = 200): Promise<void> {
     const canSet = canSetSecrets(app);
@@ -272,20 +280,32 @@ export function dashboardRoutes(deps: Deps): express.Router {
       try {
         rows = await secretStatuses(deps, app);
       } catch (err) {
-        loadError = `Couldn't read app.yaml from GitHub: ${(err as Error).message}`;
+        loadError = `Couldn't read the secrets: ${(err as Error).message}`;
       }
     }
+    const activeDeploy = deps.db
+      .select()
+      .from(jobs)
+      .where(and(eq(jobs.app, app.name), eq(jobs.env, env), eq(jobs.kind, "deploy"), inArray(jobs.status, ACTIVE)))
+      .orderBy(desc(jobs.id))
+      .get();
     res.status(status).render("secrets", {
       title: `${app.name} secrets`,
       app,
       env,
       secrets: rows,
+      // Saved or removed since the environment's last deploy started.
+      pending: rows.filter((s) => s[env].notDeployed || s[env].removing),
+      activeDeploy: activeDeploy ?? null,
+      canDeploy: ["active", "failed"].includes(app.status),
       error: error ?? loadError,
       canSet,
       loadFailed: !!loadError,
       deployed: !!(env === "staging" ? app.stagingReleaseId : app.prodReleaseId),
     });
   }
+
+  const secretsPage = (app: AppRow, env: AppEnv) => `/apps/${app.name}/secrets/${env}`;
 
   router.get("/apps/:name/secrets/:env", async (req, res) => {
     const app = getApp(deps, param(req, "name"));
@@ -299,11 +319,20 @@ export function dashboardRoutes(deps: Deps): express.Router {
     const env = param(req, "env");
     if (!app || !isAppEnv(env)) return notFound(res, "That page");
     // Values are never echoed back: on an error the form comes back empty.
+    const body = (req.body ?? {}) as Record<string, unknown>;
     const values = new Map<string, string>();
-    for (const [field, value] of Object.entries(req.body ?? {})) {
+    for (const [field, value] of Object.entries(body)) {
       if (field.startsWith("value:") && typeof value === "string" && value.trim()) values.set(field.slice(6), value);
     }
-    const pasted = parseEnvFile(typeof req.body?.env_file === "string" ? req.body.env_file : "");
+    const newName = typeof body.new_name === "string" ? body.new_name.trim().toUpperCase() : "";
+    const newValue = typeof body.new_value === "string" ? body.new_value : "";
+    if (newName && !newValue.trim()) return renderSecrets(res, app, env, `Enter a value for ${newName}. Nothing was saved.`, 400);
+    if (newValue.trim() && !newName) return renderSecrets(res, app, env, "Enter a name for the new secret. Nothing was saved.", 400);
+    if (newName) {
+      if (values.has(newName)) return renderSecrets(res, app, env, `${newName} is already in the list above; set it there. Nothing was saved.`, 400);
+      values.set(newName, newValue);
+    }
+    const pasted = parseEnvFile(typeof body.env_file === "string" ? body.env_file : "");
     if (pasted.badLines.length) {
       const lines = pasted.badLines.length > 1 ? `Lines ${listing(pasted.badLines.map(String))} of the pasted text aren't` : `Line ${pasted.badLines[0]} of the pasted text isn't`;
       return renderSecrets(res, app, env, `${lines} KEY=value. Nothing was saved.`, 400);
@@ -315,29 +344,66 @@ export function dashboardRoutes(deps: Deps): express.Router {
       }
       values.set(key, value);
     }
+    const remove = [body.remove ?? []].flat().filter((k): k is string => typeof k === "string" && k !== "");
+    const deploy = body.deploy !== "0";
     let result: SetSecretsResult;
     try {
-      result = await setSecrets(deps, app, env, values, req.user!.email);
+      result = await setSecrets(deps, app, env, { values, remove, deploy }, req.user!.email);
     } catch (err) {
       if (!(err instanceof ApiError)) throw err;
       return renderSecrets(res, app, env, err.message, err.status);
     }
-    const { saved, failed, ignored, redeploy } = result;
-    const them = saved.length > 1 ? "them" : "it";
+    const { saved, failed, removed, redeploy, deployed } = result;
+    const Env = env === "staging" ? "Staging" : "Prod";
     flash(
       req,
       [
-        `Saved ${listing(saved)} for ${env}.`,
+        saved.length ? `Saved ${listing(saved)} for ${env}.` : "",
+        removed.length ? (deployed ? `Marked ${listing(removed)} for removal from ${env}.` : `Removed ${listing(removed)} from ${env}.`) : "",
         redeploy
-          ? `Redeploying ${env} so the app picks ${them} up (job #${redeploy.id}).`
-          : `${env} hasn't been deployed yet, so its first deploy will use ${them}.`,
-        failed.length ? `Couldn't save ${listing(failed)}: try ${failed.length > 1 ? "them" : "it"} again.` : "",
-        ignored.length ? `Ignored ${listing(ignored)}: not declared in app.yaml on main.` : "",
+          ? `Deploying ${env} so the app picks up the changes (job #${redeploy.id}).`
+          : deployed
+            ? `${Env} keeps what it has until its next deploy.`
+            : saved.length
+              ? `${Env} hasn't been deployed yet, so its first deploy will use ${saved.length > 1 ? "them" : "it"}.`
+              : "",
+        failed.length ? `Couldn't change ${listing(failed)}: try ${failed.length > 1 ? "them" : "it"} again.` : "",
       ]
         .filter(Boolean)
         .join(" "),
     );
-    res.redirect(appUrl(app.name, "settings"));
+    res.redirect(secretsPage(app, env));
+  });
+
+  // Deploy what "Save only" left for later.
+  router.post("/apps/:name/secrets/:env/deploy", async (req, res) => {
+    const app = getApp(deps, param(req, "name"));
+    const env = param(req, "env");
+    if (!app || !isAppEnv(env)) return notFound(res, "That page");
+    try {
+      const job = deploySecrets(deps, app, env, req.user!.email);
+      flash(req, `Deploying ${env} with the saved changes (job #${job.id}).`);
+    } catch (err) {
+      if (!(err instanceof ApiError)) throw err;
+      flash(req, err.message);
+    }
+    res.redirect(secretsPage(app, env));
+  });
+
+  // Take back a removal.
+  router.post("/apps/:name/secrets/:env/keep", async (req, res) => {
+    const app = getApp(deps, param(req, "name"));
+    const env = param(req, "env");
+    if (!app || !isAppEnv(env)) return notFound(res, "That page");
+    const key = typeof req.body?.key === "string" ? req.body.key : "";
+    try {
+      keepSecret(deps, app, env, key);
+      flash(req, `Kept ${key} in ${env}.`);
+    } catch (err) {
+      if (!(err instanceof ApiError)) throw err;
+      flash(req, err.message);
+    }
+    res.redirect(secretsPage(app, env));
   });
 
   // --- Custom domains (domains.ts) ---

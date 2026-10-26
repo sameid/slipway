@@ -65,7 +65,7 @@ web/src/index.css        Tailwind and HeroUI styles
 ## Secrets
 
 - Third-party keys (Stripe, OpenAI, ...) are read from `process.env` in the API, never in the frontend.
-- Declare each name under `secrets:` in `app.yaml`, and give it a fake value in tests (`vi.stubEnv`). Then tell the user to run `/secret set <KEY> --env staging` (and `prod`). The deploy fails until the value is set for that environment.
+- Declare each name the code needs under `secrets:` in `app.yaml`, and give it a fake value in tests (`vi.stubEnv`). Before you `/ship`, ask the user to run `/secret set <KEY> --env staging` (and `prod` before promoting); the name doesn't have to be on `main` first. A deploy fails while a declared name has no value for that environment.
 - Values never go in code, commits, `app.yaml` or this conversation.
 
 ## Don't change

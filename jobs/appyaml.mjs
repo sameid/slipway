@@ -6,7 +6,9 @@
 //   node appyaml.mjs get <app.yaml> <key>          e.g. web.build_command, secrets
 //   node appyaml.mjs render-shared --app NAME --out-dir DIR --modules-dir DIR --state-bucket B --region R
 //   node appyaml.mjs render-env --app NAME --env ENV --out-dir DIR --modules-dir DIR --state-bucket B --region R
-//                               (--app-yaml FILE | --inputs-json FILE)
+//                               (--app-yaml FILE [--secret-names A:B] | --inputs-json FILE)
+//   node appyaml.mjs secret-names <app.yaml> --existing A:B [--removed C:D]
+//                                                  names a deploy injects, one per line
 //   node appyaml.mjs check-links DIR [--what TEXT]   fail if a symbolic link under DIR points outside it
 //
 // The root config is written as main.tf.json: generating JSON is safer than
@@ -30,6 +32,13 @@ const RESERVED_SECRETS = new Set([
   "DB_HOST", "DB_PORT", "DB_NAME", "DB_SECRET_ARN", "DB_SSL_CA", "DATABASE_URL",
 ]);
 const RESERVED_SECRET_PREFIXES = ["AWS_", "ECS_"];
+// Names that change how Node or the OS runs the app. app.yaml may declare them
+// (a pull request), but a parameter that only exists, set on the dashboard
+// without one, isn't injected. deployer/src/names.ts has the same list.
+const RUNTIME_SECRETS = new Set([
+  "PATH", "HOME", "SHELL", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "SSL_CERT_FILE", "SSL_CERT_DIR",
+]);
+const RUNTIME_SECRET_PREFIXES = ["NODE_", "LD_"];
 
 const TOP_LEVEL_KEYS = new Set([
   "name", "template", "description", "owner", "api", "web", "secrets", "auto_merge", "sizes",
@@ -218,6 +227,28 @@ export function inputsFromConfig(config, env) {
   };
 }
 
+/**
+ * The secrets a deploy injects (design 5.8): every name app.yaml declares, which
+ * deploy-env has checked exist, plus every other parameter that exists for the
+ * environment (added on the dashboard), except the ones being removed and names
+ * only app.yaml may use. `conflicts`: declared names marked for removal.
+ */
+export function secretNames({ declared, existing, removed = [] }) {
+  const removing = new Set(removed);
+  const names = [...declared];
+  const skipped = [];
+  for (const name of [...new Set(existing)].sort()) {
+    if (declared.includes(name) || removing.has(name)) continue;
+    if (!SECRET_NAME.test(name)) skipped.push(`${name} (not an UPPER_SNAKE_CASE name)`);
+    else if (RESERVED_SECRETS.has(name) || RESERVED_SECRET_PREFIXES.some((p) => name.startsWith(p))) skipped.push(`${name} (set by the platform)`);
+    else if (RUNTIME_SECRETS.has(name) || RUNTIME_SECRET_PREFIXES.some((p) => name.startsWith(p))) skipped.push(`${name} (only app.yaml may declare it)`);
+    else names.push(name);
+  }
+  return { names, skipped, conflicts: declared.filter((name) => removing.has(name)) };
+}
+
+const nameList = (value) => (value ? value.split(":").filter(Boolean) : []);
+
 /** Root config for apps/<app>/<env>.tfstate. Per-phase values stay variables (-var on the command line). */
 export function renderEnv({ app, env, inputs, outDir, modulesDir, stateBucket, region, versions = readVersions() }) {
   if (!region) throw new Error("region is required");
@@ -374,6 +405,8 @@ export function main(argv) {
       let inputs;
       if (flags["app-yaml"]) {
         inputs = inputsFromConfig(loadConfig(flags["app-yaml"], flags.app), flags.env);
+        // From secret-names: app.yaml's plus the dashboard's.
+        if (flags["secret-names"] !== undefined) inputs.secret_names = nameList(flags["secret-names"]);
       } else if (flags["inputs-json"]) {
         inputs = JSON.parse(readFileSync(flags["inputs-json"], "utf8"));
       } else {
@@ -384,6 +417,24 @@ export function main(argv) {
         stateBucket: flags["state-bucket"], region: flags.region,
       }));
       return `rendered ${flags["out-dir"]}/main.tf.json`;
+    }
+    case "secret-names": {
+      if (positional.length !== 1 || flags.existing === undefined) {
+        throw new UsageError("usage: secret-names <app.yaml> --existing A:B [--removed C:D]");
+      }
+      const { names, skipped, conflicts } = secretNames({
+        declared: loadConfig(positional[0]).secrets,
+        existing: nameList(flags.existing),
+        removed: nameList(flags.removed),
+      });
+      if (conflicts.length) {
+        throw new UsageError(
+          `${conflicts.join(", ")} ${conflicts.length > 1 ? "are" : "is"} being removed on the dashboard, but this release's app.yaml requires ${conflicts.length > 1 ? "them" : "it"}. Keep ${conflicts.length > 1 ? "them" : "it"} on the app's secrets page, or deploy a release that doesn't declare ${conflicts.length > 1 ? "them" : "it"}`,
+        );
+      }
+      if (names.length > MAX_SECRETS) throw new UsageError(`at most ${MAX_SECRETS} secrets per environment; this one has ${names.length}`);
+      for (const note of skipped) console.error(`warning: not injecting ${note}`);
+      return names.join("\n");
     }
     case "check-links": {
       if (positional.length !== 1) throw new UsageError("usage: check-links <dir> [--what TEXT]");
@@ -398,7 +449,7 @@ export function main(argv) {
       return `no symbolic links out of ${flags.what ?? positional[0]}`;
     }
     default:
-      throw new UsageError("usage: appyaml.mjs validate|get|render-shared|render-env|check-links ...");
+      throw new UsageError("usage: appyaml.mjs validate|get|render-shared|render-env|secret-names|check-links ...");
   }
 }
 

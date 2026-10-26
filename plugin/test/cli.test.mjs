@@ -87,14 +87,31 @@ describe("against a mock deployer", () => {
       ["GET", /^\/api\/apps\/[^/]+\/pulls\/(\d+)$/, () => state.pull()],
       ["GET", /^\/api\/apps\/[^/]+\/jobs\/(\d+)\/log$/, ({ match }) => ({ text: `line one of job ${match[1]}\nnpm test failed\n` })],
       ["GET", /^\/api\/apps\/[^/]+\/jobs$/, () => ({ json: { jobs: [job({ id: 9, status: "failed", failedStep: "test", error: "1 test failed" })] } })],
-      ["GET", /^\/api\/apps\/[^/]+\/secrets$/, () => ({ json: { secrets: [{ key: "STRIPE_KEY", staging: { set: true, lastSetBy: "alice", lastSetAt: new Date().toISOString() }, prod: { set: false, lastSetBy: null, lastSetAt: null } }] } })],
+      ["GET", /^\/api\/apps\/[^/]+\/secrets$/, () => ({
+        json: {
+          secrets: [
+            {
+              key: "STRIPE_KEY",
+              required: true,
+              staging: { set: true, lastSetBy: "alice", lastSetAt: new Date().toISOString(), notDeployed: false, removing: false },
+              prod: { set: false, lastSetBy: null, lastSetAt: null, notDeployed: false, removing: false },
+            },
+            {
+              key: "SLACK_TOKEN",
+              required: false,
+              staging: { set: true, lastSetBy: "bob", lastSetAt: new Date().toISOString(), notDeployed: true, removing: false },
+              prod: { set: false, lastSetBy: null, lastSetAt: null, notDeployed: false, removing: false },
+            },
+          ],
+        },
+      })],
       ["POST", /^\/api\/apps\/[^/]+\/secrets\/(\w+)\/(\w+)\/link$/, ({ match }) =>
-        match[2] === "STRIPE_KEY"
+        match[2] !== "DB_HOST"
           ? {
               status: 201,
               json: { url: `https://deployer.example/secrets/set/tok-${match[1]}-${match[2]}`, linkId: "lnk1", expiresAt: new Date(Date.now() + 600_000).toISOString() },
             }
-          : { status: 400, json: { error: `${match[2]} isn't declared under secrets: in app.yaml on main.` } }],
+          : { status: 400, json: { error: `${match[2]} is set by the platform.` } }],
       ["GET", /^\/api\/apps\/[^/]+\/secret-links\/(\w+)$/, () => state.link()],
       ["POST", /^\/api\/apps\/[^/]+\/destroy$/, () => ({ status: 202, json: { status: "destroy_requested", dashboardUrl: "https://deployer.example/apps/loan-tracker" } })],
     ]);
@@ -294,8 +311,9 @@ describe("against a mock deployer", () => {
   test("secret list", async () => {
     const r = await runCli(["secret", "list"], { cwd: repo, env: env() });
     assert.equal(r.code, 0, r.stderr);
-    assert.match(r.stdout, /STRIPE_KEY\n {2}staging: set by alice/);
-    assert.match(r.stdout, /prod: {4}NOT SET/);
+    assert.match(r.stdout, /STRIPE_KEY \(required by app.yaml\)\n {2}staging: set by alice/);
+    assert.match(r.stdout, /prod: {4}NOT SET \(required: deploys fail until it's set\)/);
+    assert.match(r.stdout, /SLACK_TOKEN\n {2}staging: set by bob .*, not deployed yet\n {2}prod: {4}not set/);
   });
 
   test("secret set: link, value entered, redeploy succeeds", async () => {
@@ -310,11 +328,22 @@ describe("against a mock deployer", () => {
     assert.match(r.stdout, /redeployed/);
   });
 
-  test("secret set refuses undeclared keys and bad envs", async () => {
-    // Declared names are checked by the deployer against app.yaml on main, not the local checkout.
-    const undeclared = await runCli(["secret", "set", "OPENAI_KEY", "--env", "staging"], { cwd: repo, env: env() });
-    assert.equal(undeclared.code, 1);
-    assert.match(undeclared.stderr, /isn't declared/);
+  test("secret set: a new name, saved without deploying", async () => {
+    state.link = sequence(
+      { json: { status: "pending", usedAt: null, deployRequested: true, redeploy: null } },
+      { json: { status: "used", usedAt: new Date().toISOString(), deployRequested: false, redeploy: null } },
+    );
+    const r = await runCli(["secret", "set", "SLACK_TOKEN", "--env", "staging", ...FAST], { cwd: repo, env: env() });
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stdout, /tok-staging-SLACK_TOKEN/);
+    assert.match(r.stdout, /saved without deploying \(Save only\)/);
+  });
+
+  test("secret set passes on the deployer's refusals and checks envs", async () => {
+    // Which names are allowed is the deployer's call, not the local checkout's.
+    const refused = await runCli(["secret", "set", "DB_HOST", "--env", "staging"], { cwd: repo, env: env() });
+    assert.equal(refused.code, 1);
+    assert.match(refused.stderr, /set by the platform/);
     assert.equal((await runCli(["secret", "set", "STRIPE_KEY", "--env", "dev"], { cwd: repo, env: env() })).code, 2);
     assert.equal((await runCli(["secret", "set", "stripe", "--env", "prod"], { cwd: repo, env: env() })).code, 2);
   });

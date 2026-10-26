@@ -6,13 +6,15 @@
 #   and for staging/prod apply: COMMIT_SHA, IMAGE_DIGEST, WEB_ARTIFACT, DEPLOY_ID,
 #   plus CUSTOM_DOMAIN and CERTIFICATE_ARN (both or neither) when the env has a
 #   custom domain. Every apply passes them, so an apply without them detaches it.
+#   SECRETS_REMOVED (KEY:KEY): secrets the dashboard is removing, left out of this deploy.
 # From the runner: RELEASES_BUCKET, STATE_BUCKET, AWS_ACCOUNT_ID, SLIPWAY_HOME,
 #   SLIPWAY_WORK, SLIPWAY_EXPORTS, and AWS_PROFILE=slipway-deploy for credentials.
 #   It never runs app code: app.yaml is only parsed.
 # Exports (staging/prod apply): APP_URL, SERVICE_URL.
 #
 # staging/prod apply:
-#   secrets-check     every name under secrets: in app.yaml has a parameter for this env
+#   secrets-check     every name under secrets: in app.yaml has a parameter for this env;
+#                     every parameter the env has is injected, except SECRETS_REMOVED
 #   terraform-phase1  migrate task -> new image; the service keeps its image, release and deploy id
 #   migrate           one-off Fargate task; stop here if it fails
 #   rollout-settings  shorter canary waits and faster health checks on the service
@@ -319,23 +321,32 @@ mapfile -t declared < <(appyaml get "$TMP/app.yaml" secrets | sed '/^$/d')
 HEALTH_PATH=$(appyaml get "$TMP/app.yaml" api.health_check)
 
 step secrets-check
+mapfile -t existing < <(secret_parameters | sed "s#^/apps/$APP/$ENV/##")
+existing_lines=$(printf '%s\n' "${existing[@]}")
 if ((${#declared[@]})); then
-  existing=$(secret_parameters)
   missing=()
   for key in "${declared[@]}"; do
-    grep -qxF "/apps/$APP/$ENV/$key" <<<"$existing" || missing+=("$key")
+    grep -qxF "$key" <<<"$existing_lines" || missing+=("$key")
   done
   if ((${#missing[@]})); then
     list=$(printf ', %s' "${missing[@]}")
-    die "missing secrets for $ENV: ${list:2}. Set each one with /secret set <NAME> --env $ENV, then deploy again"
+    die "missing secrets for $ENV: ${list:2}. Set each one on the app's secrets page or with /secret set <NAME> --env $ENV, then deploy again"
   fi
-  echo "all ${#declared[@]} declared secrets are set for $ENV"
+  echo "all ${#declared[@]} secrets app.yaml requires are set for $ENV"
 else
-  echo "app.yaml declares no secrets"
+  echo "app.yaml requires no secrets"
 fi
+# Every parameter the env has goes into the task definition, not only app.yaml's
+# (design 5.8), except the ones the dashboard is removing: SECRETS_REMOVED, KEY:KEY.
+[[ "${SECRETS_REMOVED:-}" =~ ^[A-Z0-9_:]*$ ]] || die "SECRETS_REMOVED must be KEY:KEY, not '$SECRETS_REMOVED'"
+# A command substitution, not < <(...), so a refusal stops the deploy.
+inject_lines=$(appyaml secret-names "$TMP/app.yaml" --existing "$(IFS=:; echo "${existing[*]}")" --removed "${SECRETS_REMOVED:-}")
+mapfile -t inject < <(sed '/^$/d' <<<"$inject_lines")
+echo "injecting ${#inject[@]} secrets: $(IFS=,; echo "${inject[*]:-none}")"
+[[ -z "${SECRETS_REMOVED:-}" ]] || echo "leaving out (being removed): ${SECRETS_REMOVED//:/, }"
 
 step terraform-phase1
-render_env --app-yaml "$TMP/app.yaml"
+render_env --app-yaml "$TMP/app.yaml" --secret-names "$(IFS=:; echo "${inject[*]}")"
 tf_init
 CURRENT_IMAGE=$(tf_out service_image)
 CURRENT_RELEASE=$(tf_out release)

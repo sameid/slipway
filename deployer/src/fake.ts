@@ -449,6 +449,8 @@ type FakeCertificate = {
 export class FakePlatform implements Platform {
   /** Names written; values are dropped so even fake mode can't read them back. */
   written: string[] = [];
+  /** The parameters that exist, by name. */
+  parameters = new Set<string>();
   failedDeploys: { app: string; env: string; summary: string }[] = [];
   certificates = new Map<string, FakeCertificate>();
   private nextCertificate = 1;
@@ -533,6 +535,16 @@ export class FakePlatform implements Platform {
 
   async putAppSecret(name: string, _value: string): Promise<void> {
     this.written.push(name);
+    this.parameters.add(name);
+  }
+
+  async listAppSecrets(app: string, env: "staging" | "prod"): Promise<string[]> {
+    const path = `/apps/${app}/${env}/`;
+    return [...this.parameters].filter((n) => n.startsWith(path)).map((n) => n.slice(path.length)).sort();
+  }
+
+  async deleteAppSecret(name: string): Promise<void> {
+    this.parameters.delete(name);
   }
 }
 

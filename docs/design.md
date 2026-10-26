@@ -39,6 +39,7 @@ These changes came out of building the platform and checking the region. Where t
     Running `/setup` again updates everything. Others who share a deployer run `/connect <url>`. Because an installed plugin only gets its own directory, the repo root is the plugin's root (marketplace source `.`), so `/setup` has `foundation/`, `deployer/`, `jobs/` and `modules/` next to it. The allowed users and the CODEOWNERS entry moved from user data to the SSM parameter `/slipway/deployer/github-access`, so changing them restarts the deployer instead of replacing the instance. [foundation.md](foundation.md) has the details.
 
 14. **Custom domains (bring your own).** Someone who owns a domain can attach it to an app's staging or prod on the dashboard; see 5.10. Buying domains is still out of scope.
+15. **Secrets without a pull request.** A secret no longer has to be declared in `app.yaml` before it can be set. Every deploy injects all of an environment's parameters, and `secrets:` lists the required ones, which deploys check. Saving can deploy now or leave it to the next deploy, and secrets can be removed on the dashboard; see 5.8.
 
 ## 1. Summary
 
@@ -547,7 +548,7 @@ The plugin sends the colleague's `gh auth token`. The deployer checks it with Gi
 | `GET /api/apps/:name/pulls/:number` | Plugin | PR check, merge and deploy state for `/ship` |
 | `GET /api/apps/:name/jobs` | Plugin | Recent jobs and log links |
 | `POST /api/apps/:name/destroy` | Plugin | Request teardown |
-| `GET /api/apps/:name/secrets` | Plugin | Secret names per environment, whether each is set, last set by and when |
+| `GET /api/apps/:name/secrets` | Plugin | Secret names, whether app.yaml requires each, and per environment whether it's set, by whom and when, not yet deployed, or being removed |
 | `POST /api/apps/:name/secrets/:env/:key/link` | Plugin | Create a one-time link to set a value |
 | `GET`, `POST /secrets/set/:token` | Browser | The form behind the one-time link |
 
@@ -559,7 +560,7 @@ The plugin sends the colleague's `gh auth token`. The deployer checks it with Gi
 | `/` | Jobs in progress, the last webhook received, and every app: staging release, prod release, last deploy result, links |
 | `/apps/:name` | Staging and prod with Promote, and Sync with GitHub, above four tabs (`?tab=`): **Jobs** (job history with log links; the default), **Releases** (Rollback, release history), **Code** (pull requests and their checks, recent webhooks) and **Settings** (secret names and status, confirm teardown). Jobs, releases and pull requests show 25 at a time, with Load more |
 | `/apps/:name/domains/:env` | Add a custom domain to an environment, see the DNS records to create and the domain's status, retry or remove it (5.10) |
-| `/apps/:name/secrets/:env` | Set any number of an environment's secret values at once, typed into fields or pasted as a `.env` file, with one redeploy (see 5.8) |
+| `/apps/:name/secrets/:env` | Add, change or remove any number of an environment's secrets at once, typed into fields or pasted as a `.env` file, then Save and deploy or Save only; Deploy for changes saved earlier (see 5.8) |
 | `/deliveries` | Webhooks: every GitHub delivery and what the deployer did with it, filterable by app and outcome |
 | `/secrets/set/:token` | One-time form to set a secret value (no dashboard account needed; the token is the authorization) |
 | `/users` (admins) | Create accounts, reset passwords, disable accounts |
@@ -621,37 +622,52 @@ Apps often need their own secrets, such as a Stripe or OpenAI API key. These are
 - One parameter per key means the deployer can write a single value without reading anything back.
 - Staging and prod values are always separate. Nothing copies secrets between environments, so promoting a release never changes which keys prod uses.
 
-**Declaring**
+**Which secrets an app gets**
 
-Secret names go in `app.yaml` under `secrets:`. Values never go in the repo. Adding a name is a normal code change (PR, check, auto-merge); the next deploy fails until the value is set for that environment, so an app never starts with a missing key.
+An environment gets every parameter under `/apps/<name>/<env>/`. Adding a secret is just setting a value for a new name, on the dashboard or with `/secret set`: no pull request, no build. The names under `secrets:` in `app.yaml` are the ones the code **requires**. A deploy fails until each of them is set for that environment, so an app never starts without a key it needs, and they can't be removed. Declaring a key in the same pull request as the code that reads it is still the recommended habit; setting its value first means that pull request's deploy doesn't fail.
+
+Names follow the `app.yaml` rules: up to 64 capital letters, digits and underscores, and none the platform sets itself (`PORT`, `NODE_ENV`, `DB_*`, `AWS_*`, ...). Names that change how Node or the OS runs the app (`NODE_*` such as `NODE_OPTIONS`, `LD_*`, `PATH`, `HOME`, the proxy variables, ...) can only be declared in `app.yaml`, through a pull request: setting one on the dashboard could otherwise run code that never went through a check. `deploy-env` skips any such parameter that isn't declared. An environment can have at most 50 secrets.
 
 **Setting a value**
 
 Anything typed into Claude Code is sent to the model and kept in the session transcript, so values must not pass through the conversation.
 
 1. The colleague runs `/secret set STRIPE_KEY --env staging`.
-2. The plugin calls `POST /api/apps/my-app/secrets/staging/STRIPE_KEY/link`. The deployer checks that the caller is in the org and that the key is declared in `app.yaml`, then returns a one-time link valid for 10 minutes.
+2. The plugin calls `POST /api/apps/my-app/secrets/staging/STRIPE_KEY/link`. The deployer checks that the caller is in the org and that the name is allowed, then returns a one-time link valid for 10 minutes.
 3. The colleague opens the link and pastes the value into a password field.
-4. The deployer writes the parameter, records who set it and when, marks the link used, and queues a redeploy of that environment with its current release.
-5. `/secret set` waits for the redeploy and confirms.
+4. The colleague picks **Save and deploy** or **Save only**. The deployer writes the parameter, records who set it and when, and marks the link used. With **Save and deploy** it also queues a redeploy of that environment with its current release (reusing a deploy that's already queued).
+5. `/secret set` waits for the redeploy and confirms, or reports that the value is saved for the next deploy.
 
-Containers read secrets only at startup, which is why every change triggers a redeploy. Rotating a key is the same flow: set it again.
+Containers read secrets only when they start, so a changed value reaches the app with the next deploy. **Save only** is for collecting several changes, or for not disturbing the app right now. Until the next deploy the app keeps its current values. A task that starts for another reason in the meantime (scaling, a replaced task) already gets a changed value of an existing name, but not a new name, which the task definition doesn't list yet. Rotating a key is the same flow: set it again.
 
-**Setting several values from the dashboard**
+**The dashboard's secrets page**
 
-Someone with a dashboard account can set an environment's values together on `/apps/<name>/secrets/<env>`, instead of running `/secret set` once per key. The page has a password field for every name declared in `app.yaml` on `main`, plus an optional box for pasting a `.env` file; empty fields keep their current value. Names in the pasted text that `app.yaml` doesn't declare are ignored and listed back. Nothing is written if a pasted line can't be read, a value is too long, or a field and the pasted text disagree. The deployer then writes each value, records the dashboard user as the one who set it, and queues one redeploy of that environment for the whole batch. Values are never shown back, not even when the form has an error.
+Someone with a dashboard account can change an environment's secrets together on `/apps/<name>/secrets/<env>`, instead of running `/secret set` once per key:
 
-`/secret list` shows each declared name per environment, whether it's set, and who last set it. Nobody, including the dev team through the dashboard, can view a value after it's set.
+- a password field for every name the app has in either environment, plus `app.yaml`'s required ones;
+- a row for adding a new name and value;
+- a box for pasting a `.env` file, whose new names are added;
+- a **Remove** checkbox for each secret `app.yaml` doesn't require.
+
+Empty fields keep their current value. Nothing is written if a pasted line can't be read, a value is too long, a name isn't allowed, or a field and the pasted text disagree. The deployer writes each value, records the dashboard user as the one who set it, and then either queues one redeploy for the whole batch (**Save and deploy**) or leaves the changes for the next deploy (**Save only**). Values are never shown back, not even when the form has an error.
+
+Changes saved after the environment's last deploy started are marked "not deployed", and the page offers **Deploy** to redeploy what the environment runs. A merge to `main` (staging), a promote or a rollback picks them up as well.
+
+**Removing a secret**
+
+The running tasks' definition names every secret it was started with, and a task can't start if one of those parameters is missing. So removal goes through a deploy. Removing marks the secret; the next deploy of that environment, now or later, leaves it out (`SECRETS_REMOVED`). Once that deploy succeeds, the deployer deletes the parameter. If it fails, the next deploy tries again. **Keep** takes a removal back until a deploy has started on it. In an environment that has never been deployed, removal is immediate.
+
+`/secret list` and the app's Settings tab show each name per environment: whether it's set and by whom, whether it's required, not deployed or being removed. Nobody, including the dev team through the dashboard, can view a value after it's set.
 
 **Delivery to the app**
 
-`deploy-env` adds each declared secret to the ECS task definition's `secrets`, sourced from its parameter. ECS fetches them with the task execution role when a task starts and exposes them as environment variables, so app code just reads `process.env.STRIPE_KEY`.
+`deploy-env` adds every secret the environment has (except the ones being removed) to the ECS task definition's `secrets`, sourced from its parameter. ECS fetches them with the task execution role when a task starts and exposes them as environment variables, so app code just reads `process.env.STRIPE_KEY`.
 
 **Access**
 
 | Identity | Parameter Store and KMS access |
 |---|---|
-| Deployer instance role | `ssm:PutParameter` and `ssm:DescribeParameters` on `/apps/*`, `kms:Encrypt` on the platform key. No `GetParameter`, no `kms:Decrypt`: it can write values but never read them. |
+| Deployer instance role | `ssm:PutParameter`, `ssm:DescribeParameters` and `ssm:DeleteParameter` on `/apps/*`, `kms:Encrypt` on the platform key. No `GetParameter`, no `kms:Decrypt`: it can write values but never read them. |
 | App task execution role | `ssm:GetParameters` on `/apps/<name>/<env>/*` only, `kms:Decrypt` on the platform key |
 | `deploy-env` role | `ssm:DescribeParameters` on `/apps/*`, to check secrets exist; delete on teardown |
 | Colleagues | None. They set values only through one-time links, or on the dashboard's secrets page if they have an account. |

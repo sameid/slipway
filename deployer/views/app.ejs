@@ -194,11 +194,11 @@
 <% } %>
 
 <% } else { %>
-<%- include("partials/section", { heading: "Secrets", sectionNote: "Set values here or with <code>/secret set</code> in Claude Code. Nobody can view them afterwards." }) %>
+<%- include("partials/section", { heading: "Secrets", sectionNote: "Add or change them here or with <code>/secret set</code> in Claude Code. Nobody can view a value afterwards. Names under <code>secrets:</code> in app.yaml are required: deploys fail until they're set." }) %>
 <% if (secretError) { %>
 <div class="alert alert--danger" role="alert"><div class="alert__content"><p class="alert__description text-danger"><%= secretError %></p></div></div>
 <% } else if (!secrets.length) { %>
-  <div class="card card--default"><p class="empty-state">No secrets declared in app.yaml.</p></div>
+  <div class="card card--default"><p class="empty-state">No secrets yet.</p></div>
 <% } else { %>
 <div class="table-root table-root--primary">
   <div class="table__scroll-container">
@@ -207,22 +207,21 @@
       <tbody class="table__body">
       <% for (const s of secrets) { %>
         <tr class="table__row">
-          <td class="table__cell font-mono text-xs"><%= s.key %></td>
-          <% for (const env of [s.staging, s.prod]) { %>
-            <td class="table__cell"><% if (env.set) { %>set by <%= env.lastSetBy %><div class="text-xs text-muted"><%= fmt(env.lastSetAt) %></div><% } else { %><span class="chip chip--soft chip--danger chip--sm"><span class="chip__label">not set</span></span><% } %></td>
-          <% } %>
+          <td class="table__cell"><%- include("partials/secret-name", { s }) %></td>
+          <td class="table__cell"><%- include("partials/secret-status", { s: s.staging, required: s.required }) %></td>
+          <td class="table__cell"><%- include("partials/secret-status", { s: s.prod, required: s.required }) %></td>
         </tr>
       <% } %>
       </tbody>
     </table>
   </div>
 </div>
-<% if (canSetSecrets) { %>
-<div class="mt-3 flex flex-wrap gap-2">
-  <a class="button button--secondary button--sm" href="/apps/<%= app.name %>/secrets/staging">Set staging values</a>
-  <a class="button button--secondary button--sm" href="/apps/<%= app.name %>/secrets/prod">Set prod values</a>
-</div>
 <% } %>
+<% if (canSetSecrets && !secretError) { %>
+<div class="mt-3 flex flex-wrap gap-2">
+  <a class="button button--secondary button--sm" href="/apps/<%= app.name %>/secrets/staging">Edit staging secrets</a>
+  <a class="button button--secondary button--sm" href="/apps/<%= app.name %>/secrets/prod">Edit prod secrets</a>
+</div>
 <% } %>
 
 <%- include("partials/section", { heading: "Teardown" }) %>

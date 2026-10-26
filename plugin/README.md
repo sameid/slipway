@@ -29,7 +29,7 @@ If another plugin uses the same command name, the commands are also available as
 | `/new-app` | Asks for a name, template and one-line description. Then creates `<owner>/<name>` from the template (the owner is the org or account your deployer serves), registers the app with the deployer, and waits for the staging link (10–15 minutes the first time). |
 | `/ship` | Run it from a task's worktree. Commits the work, rebases onto `main` (regenerating a Drizzle migration if it conflicts), pushes the branch, and opens or updates the PR. Then it tells you the PR is submitted and stops: the deployer merges it once its check passes, and staging updates a few minutes later. `/status` shows when it's live, or the failing step and log if the check failed, so Claude can fix it and `/ship` again. |
 | `/status` | Shows the staging and prod releases with their links, running and failed jobs, and any worktrees ready to clean up. |
-| `/secret list`, `/secret set KEY --env staging\|prod` | Lists declared secrets, or gives you a one-time browser link for setting a value. Values never pass through Claude Code. |
+| `/secret list`, `/secret set KEY --env staging\|prod` | Lists the app's secrets, or gives you a one-time browser link for setting a value, new names included, deployed now or with the next deploy. Values never pass through Claude Code. |
 | `/destroy-app` | Asks for the app to be torn down. Nothing is deleted until someone confirms it on the dashboard. |
 
 The plugin also includes:

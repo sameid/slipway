@@ -46,8 +46,8 @@ These apps run on the slipway platform. Every merge to `main` deploys to staging
 ## Third-party keys
 
 - Read them from `process.env` in the API only, never in the frontend.
-- Declare the name under `secrets:` in `app.yaml`, and give it a fake value in tests (`vi.stubEnv`).
-- The user sets staging and prod values with `/secret set <KEY> --env staging|prod`, which opens a one-time browser link. Never ask for, accept or write a secret value in the conversation, code, commits or `app.yaml`. If a user pastes one, don't use it; tell them to rotate it.
+- If the code needs the key to work, declare the name under `secrets:` in `app.yaml`: deploys then fail early while it isn't set. Give it a fake value in tests (`vi.stubEnv`).
+- The user sets staging and prod values with `/secret set <KEY> --env staging|prod`, which opens a one-time browser link; the name doesn't have to be on `main` first. Ask them to set it before you `/ship` the change that reads it (Save only is enough), so that change's deploy has it. Never ask for, accept or write a secret value in the conversation, code, commits or `app.yaml`. If a user pastes one, don't use it; tell them to rotate it.
 
 ## No local running
 

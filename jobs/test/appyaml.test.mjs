@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { parseAppYaml, renderEnv, renderShared, inputsFromConfig, main, ENV_OUTPUTS, linksOutside } from "../appyaml.mjs";
+import { parseAppYaml, renderEnv, renderShared, inputsFromConfig, main, ENV_OUTPUTS, linksOutside, secretNames } from "../appyaml.mjs";
 
 const VALID = `
 name: my-app
@@ -120,6 +120,47 @@ test("renders the shared root config", () => {
   assert.equal(root.module.shared.source, "../../modules/app-shared");
   assert.equal(root.terraform.backend.s3.key, "apps/my-app/shared.tfstate");
   assert.equal(root.output.ecr_repository_url.value, "${module.shared.ecr_repository_url}");
+});
+
+test("injects app.yaml's secrets and every other parameter the env has, except removals and names only app.yaml may use", () => {
+  const { names, skipped, conflicts } = secretNames({
+    declared: ["STRIPE_KEY", "OPENAI_API_KEY"],
+    existing: ["OPENAI_API_KEY", "STRIPE_KEY", "SLACK_TOKEN", "AIRTABLE_KEY", "OLD_KEY", "NODE_OPTIONS", "AWS_REGION", "lower", "DB_HOST"],
+    removed: ["OLD_KEY"],
+  });
+  assert.deepEqual(names, ["STRIPE_KEY", "OPENAI_API_KEY", "AIRTABLE_KEY", "SLACK_TOKEN"]);
+  assert.deepEqual(skipped, [
+    "AWS_REGION (set by the platform)", "DB_HOST (set by the platform)",
+    "NODE_OPTIONS (only app.yaml may declare it)", "lower (not an UPPER_SNAKE_CASE name)",
+  ]);
+  assert.deepEqual(conflicts, []);
+  assert.deepEqual(secretNames({ declared: ["STRIPE_KEY"], existing: ["STRIPE_KEY"], removed: ["STRIPE_KEY"] }).conflicts, ["STRIPE_KEY"]);
+});
+
+test("CLI: secret-names, and render-env with them", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "appyaml-"));
+  try {
+    const file = path.join(dir, "app.yaml");
+    writeFileSync(file, VALID);
+    assert.equal(main(["secret-names", file, "--existing", "STRIPE_KEY:OPENAI_API_KEY:SLACK_TOKEN:GONE", "--removed", "GONE"]),
+      "STRIPE_KEY\nOPENAI_API_KEY\nSLACK_TOKEN");
+    assert.equal(main(["secret-names", file, "--existing", "", "--removed", ""]), "STRIPE_KEY\nOPENAI_API_KEY");
+    assert.throws(() => main(["secret-names", file, "--existing", "STRIPE_KEY", "--removed", "STRIPE_KEY"]),
+      /STRIPE_KEY is being removed on the dashboard, but this release's app.yaml requires it/);
+    assert.throws(() => main(["secret-names", file]), /usage: secret-names/);
+
+    const out = path.join(dir, "work", "my-app-staging");
+    const render = (...extra) => {
+      main(["render-env", "--app", "my-app", "--env", "staging", "--app-yaml", file, "--out-dir", out,
+        "--modules-dir", path.join(dir, "modules"), "--state-bucket", "b", "--region", "eu-west-1", ...extra]);
+      return JSON.parse(readFileSync(path.join(out, "main.tf.json"), "utf8")).module.env.secret_names;
+    };
+    assert.deepEqual(render(), ["STRIPE_KEY", "OPENAI_API_KEY"]);
+    assert.deepEqual(render("--secret-names", "STRIPE_KEY:OPENAI_API_KEY:SLACK_TOKEN"), ["STRIPE_KEY", "OPENAI_API_KEY", "SLACK_TOKEN"]);
+    assert.deepEqual(render("--secret-names", ""), []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("CLI: validate, get and render-env from a destroy-time inputs file", () => {

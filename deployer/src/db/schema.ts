@@ -114,6 +114,11 @@ export const secrets = sqliteTable(
     key: text().notNull(),
     lastSetBy: text("last_set_by"),
     lastSetAt: text("last_set_at"),
+    // Removing: the next deploy leaves it out, and once that deploy succeeds the
+    // parameter and this row go (secrets.ts). removeJobId is that deploy.
+    removeRequestedBy: text("remove_requested_by"),
+    removeRequestedAt: text("remove_requested_at"),
+    removeJobId: integer("remove_job_id"),
   },
   (t) => [primaryKey({ columns: [t.app, t.env, t.key] })],
 );
@@ -129,6 +134,8 @@ export const secretLinks = sqliteTable("secret_links", {
   expiresAt: text("expires_at").notNull(),
   usedAt: text("used_at"),
   redeployJobId: integer("redeploy_job_id"),
+  // Whether the value was saved with "Save and deploy"; null on links used before there was a choice.
+  deployRequested: integer("deploy_requested", { mode: "boolean" }),
 });
 
 // GitHub webhook deliveries and what the deployer did with each, for the

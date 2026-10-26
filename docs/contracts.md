@@ -161,12 +161,13 @@ Started by the deployer with `POST /runs`, `kind: "deploy-env"`, no source, and 
 | `DEPLOY_ID` | the deployer's job id. Goes into the container environment as `DEPLOY_ID`, so every deploy starts new tasks even when the image is unchanged (needed after a secret changes) |
 | `CUSTOM_DOMAIN` | a hostname added on the dashboard, while it's attaching or attached (staging/prod apply). Sent with `CERTIFICATE_ARN` or not at all; an apply without them detaches the domain |
 | `CERTIFICATE_ARN` | the domain's ACM certificate, in `us-east-1` |
+| `SECRETS_REMOVED` | `KEY:KEY`, secrets being removed on the dashboard (staging/prod apply, only while there are some). They're left out of this deploy; the deployer deletes their parameters once it succeeds. A name the release's `app.yaml` requires fails the deploy at `secrets-check` |
 
 `jobs/deploy-env.sh` runs as `slipway-runner` with the instance role. It never executes app code.
 
 `app.yaml` comes from `releases/<app>/<sha>/app.yaml`; source zips aren't kept after a build.
 
-Apply for staging/prod follows design 5.6: `secrets-check` → `terraform-phase1` (migrate image = new; service image, release and deploy id = what the service's primary ECS deployment runs, so a deploy after a failed one doesn't roll the service out again; the state's outputs only when that can't be read) → `migrate` (one-off Fargate task in the public subnets with a public IP, using the env's task security group; print its logs; fail on non-zero exit) → `rollout-settings` (once the service exists: shorter canary bake times, 0 and 0 minutes for staging and 1 and 0 for prod; the copy of the rollback alarm an earlier release named on the service removed (Express Mode's own alarm is left as it is: it counts 4XX answers too, but Express Mode restores it at every update); and health checks every 10s with 2 to pass on both of its target groups, set on the ECS service and target groups directly because Express Mode's Terraform resource can't; best effort, a failure only warns) → `terraform-phase2` (service image = new, deploy id = `DEPLOY_ID`; waits for steady state; creates CloudFront on the first deploy; then the rollout settings again, which also shows whether Express Mode kept them) → `web-sync` (upload `web.tgz`: `assets/` with immutable caching and never deleted, so pages still open in a browser keep working; every other file `no-cache`, copied rather than synced so a rollback's older `index.html` still overwrites; `config.json` with `no-store`; then invalidate) → `health-check` (`GET <app url>/api/health` until it returns 200 and `release` equals the short SHA; with a custom domain, also one request for it sent straight to CloudFront, only logged, because its DNS is its owner's to set up).
+Apply for staging/prod follows design 5.6: `secrets-check` (every name under `secrets:` in the release's `app.yaml` has a parameter; then `appyaml.mjs secret-names` works out the module's `secret_names`: those names plus every other parameter under `/apps/<app>/<env>/`, minus `SECRETS_REMOVED` and names only `app.yaml` may declare, at most 50) → `terraform-phase1` (migrate image = new; service image, release and deploy id = what the service's primary ECS deployment runs, so a deploy after a failed one doesn't roll the service out again; the state's outputs only when that can't be read) → `migrate` (one-off Fargate task in the public subnets with a public IP, using the env's task security group; print its logs; fail on non-zero exit) → `rollout-settings` (once the service exists: shorter canary bake times, 0 and 0 minutes for staging and 1 and 0 for prod; the copy of the rollback alarm an earlier release named on the service removed (Express Mode's own alarm is left as it is: it counts 4XX answers too, but Express Mode restores it at every update); and health checks every 10s with 2 to pass on both of its target groups, set on the ECS service and target groups directly because Express Mode's Terraform resource can't; best effort, a failure only warns) → `terraform-phase2` (service image = new, deploy id = `DEPLOY_ID`; waits for steady state; creates CloudFront on the first deploy; then the rollout settings again, which also shows whether Express Mode kept them) → `web-sync` (upload `web.tgz`: `assets/` with immutable caching and never deleted, so pages still open in a browser keep working; every other file `no-cache`, copied rather than synced so a rollback's older `index.html` still overwrites; `config.json` with `no-store`; then invalidate) → `health-check` (`GET <app url>/api/health` until it returns 200 and `release` equals the short SHA; with a custom domain, also one request for it sent straight to CloudFront, only logged, because its DNS is its owner's to set up).
 
 Both Terraform phases pass `custom_domain` and `certificate_arn` (empty without a domain), so phase 1 already attaches or detaches the domain, before the migration. If CloudFront refuses the hostname because another distribution has it (in any AWS account), the job fails with an `ERROR:` line saying so.
 
@@ -200,7 +201,7 @@ Sizes:
 
 The presets use `db.t3`, which every region offers (some, like `ca-west-1`, have no `db.t4g` classes for Postgres).
 
-Container environment: `PORT` (= `api.port`), `APP_ENV` (`staging` | `prod`), `RELEASE`, `DEPLOY_ID`, `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_SECRET_ARN`; ECS secrets, one per `secrets:` name (from `/apps/<app>/<env>/<KEY>`).
+Container environment: `PORT` (= `api.port`), `APP_ENV` (`staging` | `prod`), `RELEASE`, `DEPLOY_ID`, `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_SECRET_ARN`; ECS secrets, one per name in `secret_names` (from `/apps/<app>/<env>/<KEY>`): `app.yaml`'s required ones plus everything else set for the environment.
 
 Images are `linux/amd64`: provider 6.x's `aws_ecs_express_gateway_service` has no CPU architecture argument, so Express tasks run on X86_64.
 
@@ -270,7 +271,13 @@ type PullRequest = {
   failure: { step: string | null; message: string | null; logPath: string } | null;  // check, release build or staging deploy; logPath is the job that failed
   note: string | null;          // e.g. "branch is behind main; updating it", "conflicts with main: rebase and push", "changes platform-owned files; needs dev team review"
 };
-type SecretStatus = { set: boolean; lastSetBy: string | null; lastSetAt: string | null };
+type SecretStatus = {
+  set: boolean; // a parameter exists
+  lastSetBy: string | null;
+  lastSetAt: string | null;
+  notDeployed: boolean; // saved after the env's last deploy started
+  removing: boolean; // left out of the next deploy, then deleted
+};
 ```
 
 | Method and path | Request | Response |
@@ -282,11 +289,11 @@ type SecretStatus = { set: boolean; lastSetBy: string | null; lastSetAt: string 
 | `GET /api/apps/:name/jobs?limit=20` | | `{ "jobs": Job[] }` newest first |
 | `GET /api/apps/:name/jobs/:id/log?tail=200` | | `text/plain`, the last `tail` lines of the job's runner log (colleagues have no AWS console access, so logs are served here) |
 | `POST /api/apps/:name/destroy` | | `202 { "status": "destroy_requested", "dashboardUrl": "..." }`. Only the app's owner. |
-| `GET /api/apps/:name/secrets` | | `{ "secrets": [{ "key": "STRIPE_KEY", "staging": SecretStatus, "prod": SecretStatus }] }` for every name declared in `app.yaml` on `main` |
-| `POST /api/apps/:name/secrets/:env/:key/link` | | `201 { "url": "<deployer>/secrets/set/<token>", "linkId": "<opaque>", "expiresAt": "..." }`. `400` if the key isn't declared in `app.yaml` on `main`. |
-| `GET /api/apps/:name/secret-links/:linkId` | | `{ "status": "pending" \| "used" \| "expired", "usedAt": string \| null, "redeploy": Job \| null }` |
+| `GET /api/apps/:name/secrets` | | `{ "secrets": [{ "key": "STRIPE_KEY", "required": true, "staging": SecretStatus, "prod": SecretStatus }] }`: the names under `secrets:` in `app.yaml` on `main` (`required`), then every other name either environment has or is removing |
+| `POST /api/apps/:name/secrets/:env/:key/link` | | `201 { "url": "<deployer>/secrets/set/<token>", "linkId": "<opaque>", "expiresAt": "..." }`. Any name works, declared or not; `400` if it isn't UPPER_SNAKE_CASE (at most 64 characters), the platform sets it, only `app.yaml` may declare it (`NODE_*`, `LD_*`, `PATH`, proxies, ...), or the environment would have more than 50. `409` while a deploy is removing it. |
+| `GET /api/apps/:name/secret-links/:linkId` | | `{ "status": "pending" \| "used" \| "expired", "usedAt": string \| null, "deployRequested": boolean, "redeploy": Job \| null }`. `deployRequested: false`: saved with Save only, so nothing was deployed |
 
-Browser and GitHub routes: `POST /webhooks/github`; `GET`/`POST /secrets/set/:token`; dashboard pages from design 5.5, including `GET`/`POST /apps/:name/secrets/:env` for setting several values at once.
+Browser and GitHub routes: `POST /webhooks/github`; `GET`/`POST /secrets/set/:token`; dashboard pages from design 5.5, including `GET`/`POST /apps/:name/secrets/:env` for changing several secrets at once (fields `value:<KEY>`, `new_name` and `new_value`, `env_file`, `remove` (repeated), and `deploy`: `1` Save and deploy, `0` Save only), `POST /apps/:name/secrets/:env/deploy` and `POST /apps/:name/secrets/:env/keep` (`key`).
 
 ## Deployer behaviour the plugin relies on
 
@@ -296,7 +303,8 @@ Browser and GitHub routes: `POST /webhooks/github`; `GET`/`POST /secrets/set/:to
 - **Auto-merge refusals**: a passing check is not merged, and the PR gets status `blocked` with a `note` and a PR comment, when the PR is a draft, touches `.github/**` or `CODEOWNERS`, changes a platform-owned `app.yaml` field, the app has `auto_merge: false`, or updating the branch from `main` conflicts.
 - **Ordering**: builds and deploys of an app wait until its shared stack has deployed.
 - **Login rate limits**: 5 failures in 15 minutes locks an email; 20 locks an IP (colleagues in one office share an address).
-- **Secret set** writes `/apps/<app>/<env>/<KEY>` (SecureString with the `aws/ssm` key, overwrite), records it in `secrets`, marks the link used, and queues a deploy of that env's current release (if the env has one) with `requestedBy` = the GitHub login that created the link. Values set on the dashboard's secrets page are written the same way, with one deploy for the whole batch and `requestedBy` = the dashboard user's email.
+- **Secret set** writes `/apps/<app>/<env>/<KEY>` (SecureString with the `aws/ssm` key, overwrite), records it in `secrets`, and marks the link used. With Save and deploy (the link page's default) it also queues a deploy of that env's current release (if the env has one, reusing a queued deploy) with `requestedBy` = the GitHub login that created the link; with Save only the next deploy picks it up. Values set on the dashboard's secrets page are written the same way, with one deploy for the whole batch or none, and `requestedBy` = the dashboard user's email.
+- **Secret removal** marks the row in `secrets`. The next deploy of that env passes it in `SECRETS_REMOVED` and records itself as `remove_job_id`; when that deploy succeeds the deployer deletes the parameter and the row, and when it fails the next deploy tries again. An env that was never deployed has its parameter deleted at once.
 
 ## Deployer host
 
@@ -352,7 +360,7 @@ RUNNER_DEPLOY_PROFILE=
 SLIPWAY_HOME=/opt/slipway/current
 ```
 
-- **Secret values:** the deployer writes app secrets with `PutParameter` (SecureString, overwrite, no `KeyId`, so the `aws/ssm` key is used). The instance role has no `ssm:GetParameter` on `/apps/*`, so the deployer can't read them back. The runner can't either: it runs under the same role. App task execution roles can.
+- **Secret values:** the deployer writes app secrets with `PutParameter` (SecureString, overwrite, no `KeyId`, so the `aws/ssm` key is used), lists their names with `DescribeParameters` and deletes removed ones with `DeleteParameter`. The instance role has no `ssm:GetParameter` on `/apps/*`, so the deployer can't read them back. The runner can't either: it runs under the same role. App task execution roles can.
 - **Failed deploys:** every failed deploy puts the CloudWatch metric `slipway` / `FailedDeploys` with dimension `Env`, and a failed prod deploy also publishes to `ALERTS_TOPIC_ARN`. The foundation creates no alarms, so the topic message is the alert.
 - Extra settings for local runs (not in the instance's env files): `PUBLIC_URL_PARAM` (alternative to `PUBLIC_URL`), `SECRETS_KMS_KEY_ID` (optional key for app secrets), `GITHUB_APP_ID` / `GITHUB_APP_PRIVATE_KEY` / `GITHUB_WEBHOOK_SECRET` (instead of `GITHUB_APP_SECRET_ID`), `WORKER_INTERVAL_SECONDS`, `REGISTER_RETRY_MS`, `DEPLOYER_FAKE`, `FAKE_BUILD_SECONDS`. In fake mode the deployer simulates the runner and needs no socket.
 - Native modules: `argon2` and `better-sqlite3` ship prebuilt linux-x64 binaries. The deployer's `package.json` `allowScripts` lets argon2's install script run and blocks better-sqlite3's (which would fall back to `node-gyp rebuild`).
