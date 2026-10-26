@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { parseAppYaml, renderEnv, renderShared, inputsFromConfig, main, ENV_OUTPUTS, linksOutside, migrationsHash, secretNames } from "../appyaml.mjs";
+import { parseAppYaml, renderEnv, renderShared, inputsFromConfig, main, ENV_OUTPUTS, linksOutside, migrationsHash, secretNames, swapImage } from "../appyaml.mjs";
 
 const VALID = `
 name: my-app
@@ -114,6 +114,11 @@ test("renders the env root config with a relative module source and the contract
   assert.deepEqual(root.variable.migrations, { type: "string", default: "" });
   assert.equal(root.output.migrations.value, "${var.migrations}");
   assert.equal(root.module.env.migrations, undefined);
+  // Staging code swaps: per-phase, like the image.
+  assert.deepEqual(root.variable.app_command, { type: "list(string)", default: [] });
+  assert.equal(root.module.env.app_command, "${var.app_command}");
+  assert.equal(root.module.env.swap_base, "${var.swap_base}");
+  assert.equal(root.output.swap_bucket.value, "${module.env.swap_bucket}");
 });
 
 test("migrations-hash: changes with api/drizzle and the migrate command, nothing else", () => {
@@ -251,4 +256,34 @@ test("check-links: links inside the folder are fine, links out of it are not", (
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("swap-image: a base that changes with what a bundle of /app can't carry", () => {
+  const config = {
+    Cmd: ["node", "--enable-source-maps", "dist/index.js"],
+    WorkingDir: "/app/api",
+    Entrypoint: ["docker-entrypoint.sh"],
+    User: "node",
+    Env: ["PATH=/usr/local/bin:/usr/bin", "NODE_VERSION=24.11.0", "NODE_ENV=production"],
+  };
+  const dockerfile = "FROM node:24-slim\nRUN apt-get install -y ffmpeg\n";
+  const bundle = Buffer.from("app bundle");
+  const image = swapImage({ config, dockerfile, bundle });
+  assert.equal(image.bundle, "app.tgz");
+  assert.deepEqual(image.command, config.Cmd);
+  assert.match(image.base, /^[0-9a-f]{64}$/);
+  assert.match(image.sha256, /^[0-9a-f]{64}$/);
+  // The code changing doesn't change the base; the image around it does.
+  assert.equal(swapImage({ config, dockerfile, bundle: Buffer.from("other code") }).base, image.base);
+  for (const changed of [
+    { config, dockerfile: dockerfile + "RUN apt-get install -y imagemagick\n", bundle },
+    { config: { ...config, Env: [...config.Env.slice(0, 1), "NODE_VERSION=24.12.0", config.Env[2]] }, dockerfile, bundle },
+    { config: { ...config, Cmd: ["node", "dist/server.js"] }, dockerfile, bundle },
+  ]) {
+    assert.notEqual(swapImage(changed).base, image.base);
+  }
+  // Images that can't swap: the app elsewhere, another entrypoint, no bundle.
+  assert.equal(swapImage({ config: { ...config, WorkingDir: "/srv" }, dockerfile, bundle }).base, "");
+  assert.equal(swapImage({ config: { ...config, Entrypoint: ["/start.sh"] }, dockerfile, bundle }).base, "");
+  assert.equal(swapImage({ config, dockerfile, bundle: null }).base, "");
 });

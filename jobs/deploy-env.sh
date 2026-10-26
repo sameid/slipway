@@ -15,7 +15,13 @@
 # staging/prod apply:
 #   secrets-check     every name under secrets: in app.yaml has a parameter for this env;
 #                     every parameter the env has is injected, except SECRETS_REMOVED
-#   terraform-phase1  migrate task -> new image; the service stays exactly as it runs (image,
+#   deploy-mode       how: staging swaps the code into its running tasks (design 5.11) when
+#                     only the code changed (same image base, inputs, secret values,
+#                     domain and platform as the tasks started with); anything else,
+#                     and every prod deploy, rolls out
+#   swap              (a swap) copy the release's bundle to the swap bucket, point
+#                     current.json at it, and wait until every task's launcher runs it
+#   terraform-phase1  (a rollout) migrate task -> new image; the service stays exactly as it runs (image,
 #                     release, deploy id and the last apply's secrets, size, port and
 #                     health check), so this phase never rolls the old image out again
 #   migrate           one-off Fargate task, skipped when the release's migrations (the
@@ -212,6 +218,131 @@ running_service() { # cluster service
     --query 'taskDefinition.containerDefinitions[?environment[?name==`DEPLOY_ID`]] | [0].[image, environment[?name==`RELEASE`].value | [0], environment[?name==`DEPLOY_ID`].value | [0]]'
 }
 
+# The app container's environment in what the service's primary deployment
+# runs, as one JSON object (the launcher's settings are in it), and as
+# SLIPWAY_LAUNCHER the launcher it runs, if any.
+running_service_env() { # cluster service
+  local task_definition
+  task_definition=$(aws ecs describe-services --cluster "$1" --services "$2" \
+    --query 'services[0].deployments[?status==`PRIMARY`].taskDefinition | [0]' --output text) || return 1
+  [[ "$task_definition" == arn:* ]] || return 1
+  aws ecs describe-task-definition --task-definition "$task_definition" --output json \
+    --query 'taskDefinition.containerDefinitions[?environment[?name==`DEPLOY_ID`]] | [0].{environment: environment, command: command}' |
+    jq -c '(.environment | map({(.name): .value}) | add // {}) + (if .command[0:2] == ["node", "-e"] then {SLIPWAY_LAUNCHER: .command[2]} else {} end)'
+}
+
+# The service's running tasks, as JSON: [{ip, startedAt}].
+service_tasks() {
+  local arns
+  arns=$(aws ecs list-tasks --cluster "$CURRENT_CLUSTER" --service-name "$CURRENT_SERVICE" --desired-status RUNNING \
+    --query taskArns --output text | tr '\t' ' ')
+  if [[ -z "${arns// /}" || "$arns" == None ]]; then
+    echo '[]'
+    return
+  fi
+  # shellcheck disable=SC2086 # one argument per task ARN
+  aws ecs describe-tasks --cluster "$CURRENT_CLUSTER" --tasks $arns --output json \
+    --query 'tasks[?lastStatus==`RUNNING`].{ip: attachments[0].details[?name==`privateIPv4Address`].value | [0], startedAt: startedAt}'
+}
+
+# Whether a secret's value changed after the oldest running task started: ECS
+# hands tasks their secrets when they start, so only new tasks would see it.
+secrets_changed_since() { # tasks-json
+  local changed
+  changed=$(aws ssm describe-parameters --parameter-filters "Key=Path,Option=OneLevel,Values=/apps/$APP/$ENV" \
+    --query 'Parameters[].LastModifiedDate' --output json) || return 0
+  node -e '
+    const t = (x) => (typeof x === "number" ? x * 1000 : Date.parse(x));
+    const changed = JSON.parse(process.argv[1]).filter(Boolean).map(t);
+    const started = JSON.parse(process.argv[2]).map((task) => t(task.startedAt));
+    process.exit(changed.length && Math.max(...changed) > Math.min(...started) ? 0 : 1);
+  ' "$changed" "$1"
+}
+
+# Why this deploy can't swap the code into staging's running tasks, or nothing
+# when it can: only the code may differ from what the tasks were started with.
+why_not_swap() {
+  local tasks fields='{size, api_port, health_check_path, secret_names}'
+  [[ -n "$NEW_BASE" ]] || { echo "release $SHORT has no swap bundle"; return; }
+  [[ -n "$CURRENT_SERVICE" && -n "$SWAP_BUCKET" ]] || { echo "there's no service to swap into yet"; return; }
+  [[ "$(jq -r '.SLIPWAY_SWAP_BASE // ""' <<<"$RUNNING_ENV")" == "$NEW_BASE" ]] ||
+    { echo "the image changed (its Dockerfile, base image or command), or the service has no launcher yet"; return; }
+  [[ "$(jq -r '.SLIPWAY_PLATFORM // ""' <<<"$RUNNING_ENV")" == "$PLATFORM" ]] || { echo "the platform changed"; return; }
+  [[ -n "$RUNNING_INPUTS" && "$(jq -cS "$fields" <<<"$RUNNING_INPUTS")" == "$(jq -cS "$fields" <<<"$NEW_INPUTS")" ]] ||
+    { echo "the secrets, size, port or health check changed"; return; }
+  [[ "$(tf_out custom_domain)" == "$CUSTOM_DOMAIN" && "$(tf_out certificate_arn)" == "$CERTIFICATE_ARN" ]] ||
+    { echo "the custom domain changed"; return; }
+  tasks=$(service_tasks) || { echo "couldn't list the service's tasks"; return; }
+  [[ "$(jq length <<<"$tasks")" != 0 ]] || { echo "the service has no running tasks"; return; }
+  if secrets_changed_since "$tasks"; then echo "a secret's value changed since the tasks started"; fi
+}
+
+# current.json in the swap bucket: which release staging's launchers run. A
+# rollout tells them to leave it to new tasks, which start from their image.
+write_current() { # mode [bundle-key migrate]
+  jq -n --arg mode "$1" --arg release "$SHORT" --arg commitSha "$COMMIT_SHA" --arg deployId "$DEPLOY_ID" \
+    --arg base "$NEW_BASE" --arg bundle "${2:-}" --arg sha256 "$BUNDLE_SHA256" --argjson migrate "${3:-false}" \
+    --argjson migrateCommand "$(jq -c '.migrate_command' <<<"$NEW_INPUTS")" --arg migrations "$NEW_MIGRATIONS" \
+    '{mode: $mode, release: $release, commitSha: $commitSha, deployId: $deployId, base: $base, bundle: $bundle,
+      sha256: $sha256, migrate: $migrate, migrateCommand: $migrateCommand, migrations: $migrations}' >"$TMP/current.json"
+  aws s3 cp "$TMP/current.json" "s3://$SWAP_BUCKET/current.json" \
+    --content-type application/json --cache-control no-store --only-show-errors
+}
+
+# Put back what current.json said before this deploy, so the launchers go back
+# (or stay) there and a restarted task doesn't pick the failed release.
+restore_current() {
+  if [[ -n "$PREVIOUS_CURRENT" ]]; then
+    printf '%s' "$PREVIOUS_CURRENT" | aws s3 cp - "s3://$SWAP_BUCKET/current.json" \
+      --content-type application/json --cache-control no-store --only-show-errors || true
+  else
+    aws s3 rm "s3://$SWAP_BUCKET/current.json" --only-show-errors || true
+  fi
+}
+
+# Every running task's launcher reports this deploy (the load balancer would
+# only show one of them); a failure on any task stops the deploy.
+wait_for_swap() {
+  local deadline=$((SECONDS + ${SWAP_TIMEOUT_SECONDS:-300})) port ips ip status swapped failure progress last=""
+  port=$(jq -r '.api_port' <<<"$NEW_INPUTS")
+  while :; do
+    mapfile -t ips < <(service_tasks | jq -r '.[].ip // empty')
+    swapped=0
+    failure=""
+    for ip in "${ips[@]}"; do
+      status=$(curl -fsS --max-time 3 "http://$ip:$port/__slipway/launcher" 2>/dev/null || true)
+      if [[ "$(jq -r '.deployId // ""' <<<"$status" 2>/dev/null)" == "$DEPLOY_ID" ]]; then
+        swapped=$((swapped + 1))
+      elif [[ "$(jq -r '.failed.deployId // ""' <<<"$status" 2>/dev/null)" == "$DEPLOY_ID" ]]; then
+        failure=$(jq -r '.failed.reason' <<<"$status")
+      fi
+    done
+    progress="$swapped of ${#ips[@]} task(s) running $SHORT"
+    [[ "$progress" == "$last" ]] || echo "$progress"
+    last=$progress
+    if [[ -n "$failure" ]]; then
+      restore_current
+      die "a task couldn't switch to $SHORT: $failure. Staging still runs ${RUNNING_RELEASE:-the previous release}; the app's output is in its logs"
+    fi
+    if ((${#ips[@]} > 0 && swapped == ${#ips[@]})); then return 0; fi
+    if ((SECONDS > deadline)); then
+      restore_current
+      die "the tasks didn't switch to $SHORT within $((${SWAP_TIMEOUT_SECONDS:-300} / 60)) minutes; staging stays on ${RUNNING_RELEASE:-the previous release}"
+    fi
+    sleep 2
+  done
+}
+
+# Keep the five newest bundles; a task that restarts needs only current.json's.
+prune_bundles() {
+  local keys=() i
+  mapfile -t keys < <(aws s3api list-objects-v2 --bucket "$SWAP_BUCKET" --prefix bundles/ \
+    --query 'sort_by(Contents || `[]`, &LastModified)[].Key' --output text | tr '\t' '\n' | sed '/^$/d;/^None$/d')
+  for ((i = 0; i < ${#keys[@]} - 5; i++)); do
+    aws s3 rm "s3://$SWAP_BUCKET/${keys[i]}" --only-show-errors || true
+  done
+}
+
 step install
 require_tools aws node curl
 check_terraform
@@ -329,6 +460,15 @@ appyaml validate "$TMP/app.yaml" --app "$APP"
 # built before it was published, which always run the migrate task.
 NEW_MIGRATIONS=$(aws s3 cp "s3://$RELEASES_BUCKET/releases/$APP/$COMMIT_SHA/migrations.sha256" - --only-show-errors 2>/dev/null | tr -d '[:space:]' || true)
 [[ "$NEW_MIGRATIONS" =~ ^[0-9a-f]{64}$ ]] || NEW_MIGRATIONS=""
+# For staging code swaps (design 5.11): the image's command and base, and the
+# bundle's checksum (build-release), and this platform's module. A release
+# built before image.json existed always rolls out.
+aws s3 cp "s3://$RELEASES_BUCKET/releases/$APP/$COMMIT_SHA/image.json" "$TMP/image.json" --only-show-errors 2>/dev/null ||
+  echo '{}' >"$TMP/image.json"
+NEW_BASE=$(jq -r '.base // ""' "$TMP/image.json" 2>/dev/null || true)
+NEW_APP_COMMAND=$(jq -c '.command // []' "$TMP/image.json" 2>/dev/null || echo '[]')
+BUNDLE_SHA256=$(jq -r '.sha256 // ""' "$TMP/image.json" 2>/dev/null || true)
+PLATFORM=$(appyaml tree-hash "$SLIPWAY_HOME/modules/app-env")
 mapfile -t declared < <(appyaml get "$TMP/app.yaml" secrets | sed '/^$/d')
 HEALTH_PATH=$(appyaml get "$TMP/app.yaml" api.health_check)
 
@@ -357,27 +497,20 @@ mapfile -t inject < <(sed '/^$/d' <<<"$inject_lines")
 echo "injecting ${#inject[@]} secrets: $(IFS=,; echo "${inject[*]:-none}")"
 [[ -z "${SECRETS_REMOVED:-}" ]] || echo "leaving out (being removed): ${SECRETS_REMOVED//:/, }"
 
-step terraform-phase1
+step deploy-mode
 render_phase2() { render_env --app-yaml "$TMP/app.yaml" --secret-names "$(IFS=:; echo "${inject[*]}")"; }
 render_phase2
 tf_init
-# The service keeps the inputs it runs with (the last apply's) through phase 1,
-# with only this release's migrate command for the migrate task. A secret added
-# or removed, or a new size, port or health check, then reaches the service
-# with the new image in phase 2, instead of first rolling the old image out
-# again with it (one more rollout, about 3.5 minutes).
+# This release's module inputs, and the ones the service runs with (the last apply's).
+NEW_INPUTS=$(jq -c '.module.env | {size, api_port, health_check_path, migrate_command, secret_names}' "$WORK_DIR/main.tf.json")
 RUNNING_INPUTS=$(tf_out inputs)
-if [[ -n "$RUNNING_INPUTS" ]] &&
-  jq -e 'has("size") and has("api_port") and has("health_check_path") and has("secret_names")' <<<"$RUNNING_INPUTS" >/dev/null 2>&1; then
-  jq --slurpfile new "$WORK_DIR/main.tf.json" '.migrate_command = $new[0].module.env.migrate_command' \
-    <<<"$RUNNING_INPUTS" >"$TMP/phase1-inputs.json"
-  render_env --inputs-json "$TMP/phase1-inputs.json"
-fi
 LAST_MIGRATIONS=$(tf_out migrations)
 CURRENT_IMAGE=$(tf_out service_image)
 CURRENT_RELEASE=$(tf_out release)
 CURRENT_DEPLOY_ID=$(tf_out deploy_id)
 CURRENT_SERVICE=$(tf_out service_name)
+CURRENT_CLUSTER=""
+RUNNING_ENV='{}'
 if [[ -n "$CURRENT_SERVICE" ]]; then
   CURRENT_CLUSTER=$(tf_req cluster_name)
   if read -r image release deploy_id < <(running_service "$CURRENT_CLUSTER" "$CURRENT_SERVICE") &&
@@ -389,15 +522,29 @@ if [[ -n "$CURRENT_SERVICE" ]]; then
   else
     echo "warning: couldn't read what $CURRENT_SERVICE runs; phase 1 uses the last apply's outputs"
   fi
+  RUNNING_ENV=$(running_service_env "$CURRENT_CLUSTER" "$CURRENT_SERVICE") || RUNNING_ENV='{}'
 fi
-echo "service currently runs: ${CURRENT_RELEASE:-nothing (first deploy)}; deploying $SHORT"
-apply_env \
-  -var "service_image=$CURRENT_IMAGE" \
-  -var "release=$CURRENT_RELEASE" \
-  -var "deploy_id=$CURRENT_DEPLOY_ID" \
-  -var "migrate_image=$NEW_IMAGE" \
-  -var "migrations=$LAST_MIGRATIONS" \
-  "${domain_vars[@]}"
+# Code swaps leave the state alone: staging's current.json says which release
+# the tasks run, and which migrations that applied.
+SWAP_BUCKET=$(tf_out swap_bucket)
+PREVIOUS_CURRENT=""
+RUNNING_RELEASE=$CURRENT_RELEASE
+if [[ -n "$SWAP_BUCKET" ]]; then
+  PREVIOUS_CURRENT=$(aws s3 cp "s3://$SWAP_BUCKET/current.json" - --only-show-errors 2>/dev/null || true)
+  if jq -e '.mode == "swap"' <<<"$PREVIOUS_CURRENT" >/dev/null 2>&1; then
+    RUNNING_RELEASE=$(jq -r '.release' <<<"$PREVIOUS_CURRENT")
+  fi
+  swapped_migrations=$(jq -r '.migrations // empty' <<<"$PREVIOUS_CURRENT" 2>/dev/null || true)
+  [[ -z "$swapped_migrations" ]] || LAST_MIGRATIONS=$swapped_migrations
+fi
+echo "service currently runs: ${RUNNING_RELEASE:-nothing (first deploy)}; deploying $SHORT"
+SWAP_REASON="prod rolls out"
+[[ "$ENV" != staging ]] || SWAP_REASON=$(why_not_swap)
+if [[ -z "$SWAP_REASON" ]]; then
+  echo "only the code changed: swapping it into the running tasks"
+elif [[ "$ENV" == staging ]]; then
+  echo "rolling out: $SWAP_REASON"
+fi
 
 # The migrate task (design 5.9): one-off, in the public subnets with a public
 # IP and the env's task security group; its logs are printed, and a non-zero
@@ -440,38 +587,91 @@ run_migrate_task() {
   fi
 }
 
-step migrate
-CLUSTER=$(tf_req cluster_name)
-if [[ -n "$NEW_MIGRATIONS" && "$NEW_MIGRATIONS" == "$LAST_MIGRATIONS" ]]; then
-  # Same migrations folder and command as the env's last deploy: the task would
-  # find nothing to apply, and starting it takes a minute or more.
-  echo "no new migrations since $ENV's last deploy (${NEW_MIGRATIONS:0:12}); the migrate task isn't needed"
-else
-  run_migrate_task
-fi
+# Staging, when only the code changed (design 5.11): the launchers in the
+# running tasks fetch the bundle, run its migrations if it brings new ones, and
+# restart the app from it. No Terraform, migrate task or ECS rollout.
+swap_in() {
+  step swap
+  local key="bundles/$COMMIT_SHA.tgz" migrate=true
+  [[ -n "$NEW_MIGRATIONS" && "$NEW_MIGRATIONS" == "$LAST_MIGRATIONS" ]] && migrate=false
+  # Where the task role can read it.
+  aws s3 cp "s3://$RELEASES_BUCKET/releases/$APP/$COMMIT_SHA/app.tgz" "s3://$SWAP_BUCKET/$key" --only-show-errors
+  write_current swap "$key" "$migrate"
+  echo "current.json -> $SHORT (deploy $DEPLOY_ID$([[ "$migrate" == true ]] && echo ", with its migrations")); waiting for the tasks"
+  wait_for_swap
+  prune_bundles
+  APP_URL=$(tf_req app_url)
+  SERVICE_URL=$(tf_out service_url)
+}
 
-SERVICE_NAME=$(tf_out service_name)
-if [[ -n "$SERVICE_NAME" ]]; then
-  step rollout-settings
+roll_out() {
+  step terraform-phase1
+  # The service keeps the inputs it runs with (the last apply's) through phase 1,
+  # with only this release's migrate command for the migrate task. A secret added
+  # or removed, or a new size, port or health check, then reaches the service
+  # with the new image in phase 2, instead of first rolling the old image out
+  # again with it (one more rollout, about 3.5 minutes).
+  if [[ -n "$RUNNING_INPUTS" ]] &&
+    jq -e 'has("size") and has("api_port") and has("health_check_path") and has("secret_names")' <<<"$RUNNING_INPUTS" >/dev/null 2>&1; then
+    jq --argjson new "$NEW_INPUTS" '.migrate_command = $new.migrate_command' <<<"$RUNNING_INPUTS" >"$TMP/phase1-inputs.json"
+    render_env --inputs-json "$TMP/phase1-inputs.json"
+  fi
+  # Likewise the launcher and its settings (staging), as the running tasks have them.
+  jq -n --argjson env "$RUNNING_ENV" '{app_command: (($env.SLIPWAY_APP_COMMAND // "[]") | fromjson),
+    swap_base: ($env.SLIPWAY_SWAP_BASE // ""), platform: ($env.SLIPWAY_PLATFORM // ""),
+    launcher: ($env.SLIPWAY_LAUNCHER // "")}' >"$TMP/phase1.tfvars.json"
+  apply_env \
+    -var "service_image=$CURRENT_IMAGE" \
+    -var "release=$CURRENT_RELEASE" \
+    -var "deploy_id=$CURRENT_DEPLOY_ID" \
+    -var "migrate_image=$NEW_IMAGE" \
+    -var "migrations=$LAST_MIGRATIONS" \
+    -var-file "$TMP/phase1.tfvars.json" \
+    "${domain_vars[@]}"
+
+  step migrate
+  CLUSTER=$(tf_req cluster_name)
+  if [[ -n "$NEW_MIGRATIONS" && "$NEW_MIGRATIONS" == "$LAST_MIGRATIONS" ]]; then
+    # Same migrations folder and command as the env's last deploy: the task would
+    # find nothing to apply, and starting it takes a minute or more.
+    echo "no new migrations since $ENV's last deploy (${NEW_MIGRATIONS:0:12}); the migrate task isn't needed"
+  else
+    run_migrate_task
+  fi
+
+  SERVICE_NAME=$(tf_out service_name)
+  if [[ -n "$SERVICE_NAME" ]]; then
+    step rollout-settings
+    rollout_settings "$CLUSTER" "$SERVICE_NAME"
+  fi
+
+  step terraform-phase2
+  render_phase2
+  # Staging: new tasks start this release from their image, and the old ones,
+  # until they stop, leave a rollout alone. (Phase 1 made the bucket if it's new.)
+  SWAP_BUCKET=$(tf_out swap_bucket)
+  [[ -z "$SWAP_BUCKET" ]] || write_current rollout
+  jq -n --argjson command "$NEW_APP_COMMAND" --arg base "$NEW_BASE" --arg platform "$PLATFORM" \
+    --rawfile launcher "$SLIPWAY_HOME/modules/app-env/launcher.cjs" \
+    '{app_command: $command, swap_base: $base, platform: $platform, launcher: $launcher}' >"$TMP/phase2.tfvars.json"
+  apply_env \
+    -var "service_image=$NEW_IMAGE" \
+    -var "release=$SHORT" \
+    -var "deploy_id=$DEPLOY_ID" \
+    -var "migrate_image=$NEW_IMAGE" \
+    -var "migrations=$NEW_MIGRATIONS" \
+    -var-file "$TMP/phase2.tfvars.json" \
+    "${domain_vars[@]}"
+  APP_URL=$(tf_req app_url)
+  SERVICE_URL=$(tf_out service_url)
+  # Again after the rollout: a first deploy has just created the service, and
+  # "already set" shows that Express Mode kept the settings through its update.
+  echo "rollout settings after the rollout:"
+  SERVICE_NAME=$(tf_req service_name)
   rollout_settings "$CLUSTER" "$SERVICE_NAME"
-fi
+}
 
-step terraform-phase2
-render_phase2
-apply_env \
-  -var "service_image=$NEW_IMAGE" \
-  -var "release=$SHORT" \
-  -var "deploy_id=$DEPLOY_ID" \
-  -var "migrate_image=$NEW_IMAGE" \
-  -var "migrations=$NEW_MIGRATIONS" \
-  "${domain_vars[@]}"
-APP_URL=$(tf_req app_url)
-SERVICE_URL=$(tf_out service_url)
-# Again after the rollout: a first deploy has just created the service, and
-# "already set" shows that Express Mode kept the settings through its update.
-echo "rollout settings after the rollout:"
-SERVICE_NAME=$(tf_req service_name)
-rollout_settings "$CLUSTER" "$SERVICE_NAME"
+if [[ -z "$SWAP_REASON" ]]; then swap_in; else roll_out; fi
 
 step web-sync
 mkdir -p "$TMP/web"

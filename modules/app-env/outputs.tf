@@ -59,6 +59,11 @@ output "web_bucket" {
   value = aws_s3_bucket.web.id
 }
 
+# Staging only: where deploy-env puts current.json and bundles for code swaps.
+output "swap_bucket" {
+  value = local.has_swap_bucket ? aws_s3_bucket.swap[0].id : ""
+}
+
 output "distribution_id" {
   value = local.create_service ? aws_cloudfront_distribution.web[0].id : ""
 }

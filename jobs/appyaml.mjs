@@ -11,6 +11,9 @@
 //                                                  names a deploy injects, one per line
 //   node appyaml.mjs check-links DIR [--what TEXT]   fail if a symbolic link under DIR points outside it
 //   node appyaml.mjs migrations-hash DIR [--app NAME]  one hash of DIR/app.yaml's migrate command and DIR/api/drizzle
+//   node appyaml.mjs tree-hash DIR                   one hash of every file under DIR (path and contents)
+//   node appyaml.mjs swap-image --config FILE --dockerfile FILE --bundle FILE
+//                                                  image.json for staging code swaps, from docker inspect's .Config
 //
 // The root config is written as main.tf.json: generating JSON is safer than
 // templating HCL, and Terraform reads both.
@@ -216,6 +219,7 @@ export const ENV_OUTPUTS = [
   "app_url", "service_url", "service_name", "service_image", "migrate_image", "release", "deploy_id",
   "cluster_name", "migrate_task_definition_arn", "subnet_ids", "task_security_group_id", "web_bucket",
   "distribution_id", "log_group_name", "env", "custom_domain", "certificate_arn", "inputs",
+  "swap_bucket",
 ];
 
 /** Module inputs for an environment from a validated app.yaml config. */
@@ -268,6 +272,12 @@ export function renderEnv({ app, env, inputs, outDir, modulesDir, stateBucket, r
     custom_domain: { type: "string", default: "" },
     certificate_arn: { type: "string", default: "" },
     destroying: { type: "bool", default: false },
+    // Staging code swaps (design 5.11): the image's command, the base a bundle
+    // must match, and the platform's hash. Empty: no launcher.
+    launcher: { type: "string", default: "" },
+    app_command: { type: "list(string)", default: [] },
+    swap_base: { type: "string", default: "" },
+    platform: { type: "string", default: "" },
   };
   return {
     terraform: terraformBlock({ app, stack: env, stateBucket, region, versions }),
@@ -304,7 +314,52 @@ export function renderEnv({ app, env, inputs, outDir, modulesDir, stateBucket, r
 export function migrationsHash(srcDir, config) {
   const hash = createHash("sha256");
   hash.update(JSON.stringify(config.api.migrate_command));
-  const root = path.join(srcDir, "api", "drizzle");
+  hashFiles(hash, path.join(srcDir, "api", "drizzle"));
+  return hash.digest("hex");
+}
+
+/** One hash of every file under `dir` (deploy-env's platform hash of modules/app-env). */
+export function treeHash(dir) {
+  const hash = createHash("sha256");
+  hashFiles(hash, dir);
+  return hash.digest("hex");
+}
+
+/**
+ * What staging needs to swap a release's code into a running task (design
+ * 5.11): the image's command, the bundle's checksum, and its base, a hash of
+ * everything a bundle of /app can't carry (the Dockerfile, which also installs
+ * system packages, and the image's entrypoint, command, working directory,
+ * user and environment, which name the base image's Node.js). A task only
+ * swaps in bundles with its own base. base is "" when the image can't swap:
+ * the app isn't under /app, or the entrypoint isn't node's, which runs the
+ * launcher's `node -e`.
+ */
+export function swapImage({ config, dockerfile, bundle }) {
+  const command = config.Cmd ?? [];
+  const workdir = config.WorkingDir ?? "";
+  const entrypoint = config.Entrypoint ?? [];
+  const swappable =
+    command.length > 0 &&
+    (workdir === "/app" || workdir.startsWith("/app/")) &&
+    (entrypoint.length === 0 || (entrypoint.length === 1 && entrypoint[0] === "docker-entrypoint.sh")) &&
+    Boolean(bundle);
+  const base = swappable
+    ? createHash("sha256")
+        .update(dockerfile)
+        .update(JSON.stringify({ entrypoint, command, workdir, user: config.User ?? "", env: config.Env ?? [] }))
+        .digest("hex")
+    : "";
+  return {
+    base,
+    command,
+    workdir,
+    bundle: swappable ? "app.tgz" : "",
+    sha256: swappable ? createHash("sha256").update(bundle).digest("hex") : "",
+  };
+}
+
+function hashFiles(hash, root) {
   const files = [];
   const walk = (d) => {
     for (const entry of readdirSync(d, { withFileTypes: true })) {
@@ -319,7 +374,6 @@ export function migrationsHash(srcDir, config) {
     hash.update(`\0${file}\0`);
     hash.update(lstatSync(p).isSymbolicLink() ? `-> ${readlinkSync(p)}` : readFileSync(p));
   }
-  return hash.digest("hex");
 }
 
 // ---------------------------------------------------------------------------
@@ -486,8 +540,19 @@ export function main(argv) {
       if (positional.length !== 1) throw new UsageError("usage: migrations-hash <dir> [--app NAME]");
       return migrationsHash(positional[0], loadConfig(path.join(positional[0], "app.yaml"), flags.app));
     }
+    case "swap-image": {
+      need(flags, "config", "dockerfile", "bundle");
+      const bundle = existsSync(flags.bundle) ? readFileSync(flags.bundle) : null;
+      return JSON.stringify(
+        swapImage({ config: JSON.parse(readFileSync(flags.config, "utf8")), dockerfile: readFileSync(flags.dockerfile), bundle }),
+      );
+    }
+    case "tree-hash": {
+      if (positional.length !== 1) throw new UsageError("usage: tree-hash <dir>");
+      return treeHash(positional[0]);
+    }
     default:
-      throw new UsageError("usage: appyaml.mjs validate|get|render-shared|render-env|secret-names|check-links|migrations-hash ...");
+      throw new UsageError("usage: appyaml.mjs validate|get|render-shared|render-env|secret-names|check-links|migrations-hash|tree-hash|swap-image ...");
   }
 }
 

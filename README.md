@@ -72,7 +72,7 @@ docs/
 
 1. The plugin creates an app repo from its template under your GitHub owner and registers it with the deployer.
 2. The deployer reacts to GitHub webhooks and queues jobs. For each job it hands the runner, a second process on the same instance reached over a Unix socket, one of two things: the commit's zipball for a build, or the inputs for a deploy.
-3. The runner runs `jobs/build-release.sh` or `jobs/deploy-env.sh`. Steps that execute app code run as a separate Linux user with no AWS credentials. `deploy-env` renders a Terraform root config for the app and environment from `app.yaml` and applies `modules/app-env`.
+3. The runner runs `jobs/build-release.sh` or `jobs/deploy-env.sh`. Steps that execute app code run as a separate Linux user with no AWS credentials. `deploy-env` renders a Terraform root config for the app and environment from `app.yaml` and applies `modules/app-env`. On staging, a release that only changes code is swapped into the running tasks in seconds instead of rolling out a new image.
 
 The deployer, the runner, `jobs/` and `modules/` ship together as one release, versioned with the plugin. Builds run on the deployer instance rather than in CodeBuild, which keeps the platform to one instance and works in every region. Only `/setup` uses AWS credentials; everything else the plugin does goes through the GitHub CLI and the deployer's API.
 

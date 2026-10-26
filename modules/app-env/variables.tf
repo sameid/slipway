@@ -122,6 +122,33 @@ variable "certificate_arn" {
   }
 }
 
+# Staging code swaps (design 5.11), from the release's image.json. app_command is
+# the image's command (its CMD), which the launcher starts; swap_base names what
+# a bundle must have been built on to be swapped in (Dockerfile, base image,
+# command); platform is a hash of this module, so a platform change gets a full
+# rollout; launcher is launcher.cjs's source, passed in so phase 1 can keep the
+# one the service runs. Staging runs the launcher when all four are set; prod
+# never does.
+variable "launcher" {
+  type    = string
+  default = ""
+}
+
+variable "app_command" {
+  type    = list(string)
+  default = []
+}
+
+variable "swap_base" {
+  type    = string
+  default = ""
+}
+
+variable "platform" {
+  type    = string
+  default = ""
+}
+
 # Set by deploy-env just before terraform destroy: lifts prod's deletion
 # protection and gives its final snapshot a unique name.
 variable "destroying" {

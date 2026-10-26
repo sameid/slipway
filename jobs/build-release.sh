@@ -9,9 +9,11 @@
 #                           check:   secret scan
 #                           release: secret scan, npm ci, migrations check, frontend build
 #                           verify:  npm ci, type check, lint, tests
-#   image    runner       (release mode) docker build of api/Dockerfile
+#   image    runner       (release mode) docker build of api/Dockerfile, then the image's
+#                         /app as app.tgz and image.json, for staging code swaps
 #   publish  runner       (release mode, AWS_PROFILE=slipway-publish) push the image,
-#                         upload web.tgz, app.yaml and migrations.sha256 to releases/<app>/<sha>/
+#                         upload web.tgz, app.yaml, migrations.sha256, app.tgz and image.json
+#                         to releases/<app>/<sha>/
 #
 # A PR's check (MODE=check) only stops what must never reach main; the release
 # build (MODE=release) builds what staging runs. Type check, lint and tests run
@@ -158,6 +160,23 @@ case "$PHASE" in
     # BuildKit would otherwise add a provenance attestation, turning the image into an index.
     if docker buildx version >/dev/null 2>&1; then build_flags+=(--provenance=false); fi
     docker build "${build_flags[@]}" .
+
+    # Staging deploys swap the code in a running task when the image around it
+    # is the same (design 5.11): the image's /app as a bundle, and image.json
+    # with its command and base. An image without /app only rolls out.
+    step app-bundle
+    rm -f "$SLIPWAY_WORK/app.tgz"
+    container=$(docker create "$IMAGE")
+    if ! docker cp "$container:/app" - | gzip -1 >"$SLIPWAY_WORK/app.tgz"; then
+      echo "warning: the image has no /app; staging deploys of this release roll out instead of swapping"
+      rm -f "$SLIPWAY_WORK/app.tgz"
+    fi
+    docker rm "$container" >/dev/null
+    docker image inspect --format '{{json .Config}}' "$IMAGE" >"$SLIPWAY_WORK/image-config.json"
+    appyaml swap-image --config "$SLIPWAY_WORK/image-config.json" --dockerfile api/Dockerfile \
+      --bundle "$SLIPWAY_WORK/app.tgz" >"$SLIPWAY_WORK/image.json"
+    echo "image.json: $(cat "$SLIPWAY_WORK/image.json")"
+    [[ ! -f "$SLIPWAY_WORK/app.tgz" ]] || echo "app.tgz: $(du -h "$SLIPWAY_WORK/app.tgz" | cut -f1)"
     ;;
 
   publish)
@@ -209,6 +228,11 @@ case "$PHASE" in
     MIGRATIONS=$(appyaml migrations-hash "$SRC" --app "$APP")
     printf '%s\n' "$MIGRATIONS" >"$SLIPWAY_WORK/migrations.sha256"
     aws s3 cp "$SLIPWAY_WORK/migrations.sha256" "$PREFIX/migrations.sha256" --content-type text/plain --only-show-errors
+    # For staging code swaps (the image phase made them).
+    if [[ -f "$SLIPWAY_WORK/app.tgz" ]]; then
+      aws s3 cp "$SLIPWAY_WORK/app.tgz" "$PREFIX/app.tgz" --only-show-errors
+    fi
+    aws s3 cp "$SLIPWAY_WORK/image.json" "$PREFIX/image.json" --content-type application/json --only-show-errors
 
     export_var IMAGE_DIGEST "$DIGEST"
     export_var IMAGE_URI "$REPO@$DIGEST"

@@ -47,12 +47,26 @@ locals {
     DB_SECRET_ARN = aws_db_instance.db.master_user_secret[0].secret_arn
   }
 
+  # Staging runs launcher.cjs in front of the app, which swaps the code in
+  # place when a deploy points the swap bucket's current.json at a release
+  # built on the same base (design 5.11). Prod runs the image's own command.
+  has_swap_bucket = var.env == "staging"
+  swap            = local.has_swap_bucket && var.swap_base != "" && length(var.app_command) > 0 && var.launcher != ""
+  swap_env = local.swap ? {
+    SLIPWAY_APP_COMMAND = jsonencode(var.app_command)
+    SLIPWAY_HEALTH_PATH = var.health_check_path
+    SLIPWAY_SWAP_BUCKET = aws_s3_bucket.swap[0].bucket
+    SLIPWAY_SWAP_BASE   = var.swap_base
+    SLIPWAY_PLATFORM    = var.platform
+    SLIPWAY_REGION      = local.region
+  } : {}
+
   service_env = { for k, v in merge(local.db_env, {
     PORT      = tostring(var.api_port)
     APP_ENV   = var.env
     RELEASE   = var.release
     DEPLOY_ID = var.deploy_id
-  }) : k => v if v != "" }
+  }, local.swap_env) : k => v if v != "" }
 }
 
 data "aws_caller_identity" "current" {}
@@ -356,6 +370,8 @@ resource "aws_ecs_express_gateway_service" "api" {
   primary_container {
     image          = var.service_image
     container_port = var.api_port
+    # The image's ENTRYPOINT (node's docker-entrypoint.sh) runs this with node.
+    command = local.swap ? ["node", "-e", var.launcher] : null
 
     aws_logs_configuration {
       log_group         = data.aws_cloudwatch_log_group.app.name
@@ -398,6 +414,7 @@ resource "aws_ecs_express_gateway_service" "api" {
   depends_on = [
     aws_iam_role_policy.execution,
     aws_iam_role_policy.task_db_secret,
+    aws_iam_role_policy.task_swap,
     aws_ecs_cluster_capacity_providers.main,
   ]
 }
@@ -415,6 +432,29 @@ locals {
 # New buckets block public access, enforce bucket-owner ownership and encrypt
 # by default, so only the bucket and CloudFront's read policy are declared.
 # ---------------------------------------------------------------------------
+
+# Staging's code swaps: current.json, which names the release the launcher
+# runs, and that release's bundle (bundles/<commit>.tgz, the image's /app). An
+# app-* bucket, so the permissions boundary lets the task role read it.
+resource "aws_s3_bucket" "swap" {
+  count         = local.has_swap_bucket ? 1 : 0
+  bucket        = "${local.name}-swap-${local.account_id}"
+  force_destroy = true # copies of release bundles; deploy-env writes them
+}
+
+resource "aws_iam_role_policy" "task_swap" {
+  count = local.has_swap_bucket ? 1 : 0
+  name  = "swap-bucket"
+  role  = aws_iam_role.task.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      { Effect = "Allow", Action = "s3:GetObject", Resource = "${aws_s3_bucket.swap[0].arn}/*" },
+      # So a missing current.json is a 404, not a 403.
+      { Effect = "Allow", Action = "s3:ListBucket", Resource = aws_s3_bucket.swap[0].arn },
+    ]
+  })
+}
 
 resource "aws_s3_bucket" "web" {
   bucket        = "${local.name}-web-${local.account_id}"
