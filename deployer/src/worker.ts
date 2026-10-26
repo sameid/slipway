@@ -1,8 +1,9 @@
 // The job loop (design 5.5 "Worker loop"), started inside the server process so
-// SQLite only ever has one writer. Each tick: poll running runs, fail jobs whose
-// dependency failed, supersede stale staging deploys, then start what's free.
+// SQLite only ever has one writer. Each tick: poll running runs, skip builds and
+// staging deploys a newer merge replaces, fail (or skip) jobs whose dependency
+// failed (or was skipped), then start what's free.
 // Jobs run in the runner (src/runner), which takes the place of CodeBuild.
-import { and, asc, desc, eq, inArray, lt } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNull, lt, ne, or } from "drizzle-orm";
 import { autoMerge, safely } from "./automerge.js";
 import { iso, type Deps } from "./deps.js";
 import {
@@ -18,7 +19,7 @@ import {
 } from "./db/schema.js";
 import { domainDeployFinished, domainDeployStarted, domainInputs, domainsTornDown, pollDomains } from "./domains.js";
 import { secretInputs, secretsDeployFinished, secretsDeployStarted } from "./secrets.js";
-import { finishJob, getApp, getJob, getRelease, markVerified } from "./jobs.js";
+import { ACTIVE, finishJob, getApp, getJob, getRelease, markVerified, queueDeploy } from "./jobs.js";
 import { CHECK_CONTEXT, deployContext, isAppEnv, shortSha, type AppEnv } from "./names.js";
 import { parseFailure, type RunInfo } from "./runs.js";
 
@@ -67,8 +68,11 @@ export class Worker {
 
   async tick(): Promise<void> {
     await this.poll();
+    // Failures first, so a deploy whose build just failed fails rather than
+    // being superseded; then the skipped builds' deploys go with them.
     this.propagateFailures();
     this.supersede();
+    this.propagateFailures();
     await this.startReady();
     // Custom domains' certificates (throttled per domain; see domains.ts).
     try {
@@ -207,7 +211,35 @@ export class Worker {
           this.deps.github.comment(app.repo, pr, `Live on staging: ${link} (release \`${shortSha(release.commitSha)}\`)`),
         );
       }
+      // Merges whose own deploys this one superseded (latest merge wins).
+      for (const pr of this.skippedPulls(app.name, app.stagingReleaseId, release.id)) {
+        await safely(this.deps, "comment", () =>
+          this.deps.github.comment(
+            app.repo,
+            pr,
+            `Live on staging: ${link} (release \`${shortSha(release.commitSha)}\`, a later merge that includes this PR)`,
+          ),
+        );
+      }
     }
+  }
+
+  /** PRs merged as releases between staging's previous release and this one, which never deployed by themselves. */
+  private skippedPulls(app: string, previousId: number | null, releaseId: number): number[] {
+    if (previousId === null || previousId >= releaseId) return [];
+    const shas = this.deps.db
+      .select({ sha: releases.commitSha })
+      .from(releases)
+      .where(and(eq(releases.app, app), gt(releases.id, previousId), lt(releases.id, releaseId)))
+      .all()
+      .map((r) => r.sha);
+    if (!shas.length) return [];
+    return this.deps.db
+      .select({ number: pullRequests.number })
+      .from(pullRequests)
+      .where(and(eq(pullRequests.app, app), inArray(pullRequests.mergedSha, shas)))
+      .all()
+      .map((r) => r.number);
   }
 
   private mergedPullsFor(app: string, sha: string): number[] {
@@ -236,6 +268,7 @@ export class Worker {
 
     if (job.kind === "build") {
       this.deps.db.update(releases).set({ status: "failed" }).where(eq(releases.id, job.releaseId ?? -1)).run();
+      this.deployNewestBuilt(app, job);
     }
     if (job.kind === "destroy") {
       this.deps.db.update(apps).set({ error: `${where} failed: ${job.error}` }).where(eq(apps.name, app.name)).run();
@@ -266,6 +299,45 @@ export class Worker {
         await safely(this.deps, "comment", () => this.deps.github.comment(app.repo, pr, message));
       }
     }
+  }
+
+  /**
+   * A build failed, and newer merges had skipped the deploys of the ones before
+   * it (latest merge wins): deploy the newest release that did build, if it's
+   * newer than what staging runs and no other deploy is on its way.
+   */
+  private deployNewestBuilt(app: AppRow, failed: JobRow): void {
+    if (app.status !== "active" || failed.releaseId == null) return;
+    const pending = this.deps.db
+      .select()
+      .from(jobs)
+      .where(
+        and(
+          eq(jobs.app, app.name),
+          eq(jobs.env, "staging"),
+          eq(jobs.kind, "deploy"),
+          inArray(jobs.status, ACTIVE),
+          or(isNull(jobs.afterJobId), ne(jobs.afterJobId, failed.id)),
+        ),
+      )
+      .get();
+    if (pending) return;
+    const release = this.deps.db
+      .select()
+      .from(releases)
+      .where(
+        and(
+          eq(releases.app, app.name),
+          eq(releases.status, "ready"),
+          gt(releases.id, app.stagingReleaseId ?? 0),
+          lt(releases.id, failed.releaseId),
+        ),
+      )
+      .orderBy(desc(releases.id))
+      .get();
+    if (!release) return;
+    const job = queueDeploy(this.deps, app.name, "staging", release, "system");
+    this.deps.log("deploying the newest release that built", { app: app.name, release: release.id, job: job.id, failedBuild: failed.id });
   }
 
   /**
@@ -353,19 +425,37 @@ export class Worker {
 
   // --- 3. Superseding --------------------------------------------------------
 
-  /** Of several queued staging deploys for one app, only the newest runs. */
+  /**
+   * Latest merge wins. Main only moves forward, so the newest queued build of an
+   * app has every older one's changes: the others are skipped, with their
+   * releases, and their staging deploys go with them (propagateFailures). Of
+   * several queued staging deploys, only the newest runs too. A build that has
+   * already started finishes; if the newer one then fails, staging gets it
+   * (deployNewestBuilt).
+   */
   private supersede(): void {
     const queued = this.deps.db
       .select()
       .from(jobs)
-      .where(and(eq(jobs.status, "queued"), eq(jobs.kind, "deploy"), eq(jobs.env, "staging")))
+      .where(and(eq(jobs.status, "queued"), or(eq(jobs.kind, "build"), and(eq(jobs.kind, "deploy"), eq(jobs.env, "staging")))))
       .orderBy(desc(jobs.id))
       .all();
     const newest = new Map<string, number>();
     for (const job of queued) {
-      const keep = newest.get(job.app);
-      if (keep === undefined) newest.set(job.app, job.id);
-      else finishJob(this.deps, job, "superseded", { error: `Superseded by job #${keep}` });
+      const key = `${job.app}:${job.kind}`;
+      const keep = newest.get(key);
+      if (keep === undefined) {
+        newest.set(key, job.id);
+        continue;
+      }
+      finishJob(this.deps, job, "superseded", { error: `Superseded by job #${keep}` });
+      if (job.kind === "build") {
+        this.deps.db
+          .update(releases)
+          .set({ status: "superseded" })
+          .where(and(eq(releases.id, job.releaseId ?? -1), eq(releases.status, "building")))
+          .run();
+      }
     }
   }
 
@@ -424,6 +514,10 @@ export class Worker {
     }
     if (job.kind === "deploy" && isAppEnv(job.env)) {
       const release = getRelease(this.deps, job.releaseId);
+      if (release?.status === "superseded") {
+        finishJob(this.deps, job, "superseded", { error: `Release #${release.id} was skipped for a newer one` });
+        return false;
+      }
       if (!release || release.status === "failed") {
         this.failRegistration(app, finishJob(this.deps, job, "failed", { error: `Release #${job.releaseId} didn't build` }));
         return false;

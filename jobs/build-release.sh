@@ -11,7 +11,7 @@
 #                           verify:  npm ci, type check, lint, tests
 #   image    runner       (release mode) docker build of api/Dockerfile
 #   publish  runner       (release mode, AWS_PROFILE=slipway-publish) push the image,
-#                         upload web.tgz and app.yaml to releases/<app>/<sha>/
+#                         upload web.tgz, app.yaml and migrations.sha256 to releases/<app>/<sha>/
 #
 # A PR's check (MODE=check) only stops what must never reach main; the release
 # build (MODE=release) builds what staging runs. Type check, lint and tests run
@@ -204,6 +204,11 @@ case "$PHASE" in
     aws s3 cp "$WEB_TGZ" "$PREFIX/web.tgz" --only-show-errors
     # deploy-env reads app.yaml from here: source zips aren't kept after a build.
     aws s3 cp "$(app_yaml)" "$PREFIX/app.yaml" --content-type text/yaml --only-show-errors
+    # And what its migrate task would apply: deploy-env skips the task when this
+    # matches what the environment's last deploy applied.
+    MIGRATIONS=$(appyaml migrations-hash "$SRC" --app "$APP")
+    printf '%s\n' "$MIGRATIONS" >"$SLIPWAY_WORK/migrations.sha256"
+    aws s3 cp "$SLIPWAY_WORK/migrations.sha256" "$PREFIX/migrations.sha256" --content-type text/plain --only-show-errors
 
     export_var IMAGE_DIGEST "$DIGEST"
     export_var IMAGE_URI "$REPO@$DIGEST"

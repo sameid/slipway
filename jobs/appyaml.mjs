@@ -10,11 +10,13 @@
 //   node appyaml.mjs secret-names <app.yaml> --existing A:B [--removed C:D]
 //                                                  names a deploy injects, one per line
 //   node appyaml.mjs check-links DIR [--what TEXT]   fail if a symbolic link under DIR points outside it
+//   node appyaml.mjs migrations-hash DIR [--app NAME]  one hash of DIR/app.yaml's migrate command and DIR/api/drizzle
 //
 // The root config is written as main.tf.json: generating JSON is safer than
 // templating HCL, and Terraform reads both.
 
-import { mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import YAML from "yaml";
@@ -270,7 +272,9 @@ export function renderEnv({ app, env, inputs, outDir, modulesDir, stateBucket, r
   return {
     terraform: terraformBlock({ app, stack: env, stateBucket, region, versions }),
     provider: providerBlock({ app, env, region }),
-    variable: phaseVars,
+    // migrations: the migrationsHash this env's last deploy applied, kept in
+    // state for the next deploy to compare with. The module never sees it.
+    variable: { ...phaseVars, migrations: { type: "string", default: "" } },
     module: {
       env: {
         source: moduleSource(outDir, modulesDir, "app-env"),
@@ -284,8 +288,38 @@ export function renderEnv({ app, env, inputs, outDir, modulesDir, stateBucket, r
         ...Object.fromEntries(Object.keys(phaseVars).map((v) => [v, `\${var.${v}}`])),
       },
     },
-    output: Object.fromEntries(ENV_OUTPUTS.map((o) => [o, { value: `\${module.env.${o}}` }])),
+    output: {
+      ...Object.fromEntries(ENV_OUTPUTS.map((o) => [o, { value: `\${module.env.${o}}` }])),
+      migrations: { value: "${var.migrations}" },
+    },
   };
+}
+
+/**
+ * One hash of what an app's migrate task applies: app.yaml's migrate command and
+ * every file under api/drizzle, by path and contents (a symbolic link by where
+ * it points). build-release publishes it with each release, and deploy-env
+ * skips the migrate task when it equals what the env's last deploy applied.
+ */
+export function migrationsHash(srcDir, config) {
+  const hash = createHash("sha256");
+  hash.update(JSON.stringify(config.api.migrate_command));
+  const root = path.join(srcDir, "api", "drizzle");
+  const files = [];
+  const walk = (d) => {
+    for (const entry of readdirSync(d, { withFileTypes: true })) {
+      const p = path.join(d, entry.name);
+      if (entry.isDirectory()) walk(p);
+      else files.push(path.relative(root, p));
+    }
+  };
+  if (existsSync(root)) walk(root);
+  for (const file of files.sort()) {
+    const p = path.join(root, file);
+    hash.update(`\0${file}\0`);
+    hash.update(lstatSync(p).isSymbolicLink() ? `-> ${readlinkSync(p)}` : readFileSync(p));
+  }
+  return hash.digest("hex");
 }
 
 // ---------------------------------------------------------------------------
@@ -448,8 +482,12 @@ export function main(argv) {
       }
       return `no symbolic links out of ${flags.what ?? positional[0]}`;
     }
+    case "migrations-hash": {
+      if (positional.length !== 1) throw new UsageError("usage: migrations-hash <dir> [--app NAME]");
+      return migrationsHash(positional[0], loadConfig(path.join(positional[0], "app.yaml"), flags.app));
+    }
     default:
-      throw new UsageError("usage: appyaml.mjs validate|get|render-shared|render-env|secret-names|check-links ...");
+      throw new UsageError("usage: appyaml.mjs validate|get|render-shared|render-env|secret-names|check-links|migrations-hash ...");
   }
 }
 

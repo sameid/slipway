@@ -15,12 +15,16 @@
 # staging/prod apply:
 #   secrets-check     every name under secrets: in app.yaml has a parameter for this env;
 #                     every parameter the env has is injected, except SECRETS_REMOVED
-#   terraform-phase1  migrate task -> new image; the service keeps its image, release and deploy id
-#   migrate           one-off Fargate task; stop here if it fails
+#   terraform-phase1  migrate task -> new image; the service stays exactly as it runs (image,
+#                     release, deploy id and the last apply's secrets, size, port and
+#                     health check), so this phase never rolls the old image out again
+#   migrate           one-off Fargate task, skipped when the release's migrations (the
+#                     hash build-release published) match the env's last deploy; stop
+#                     here if it fails
 #   rollout-settings  shorter canary waits and faster health checks on the service
 #                     (best effort; skipped on the first deploy, before the service exists)
-#   terraform-phase2  service -> new image (first deploy: creates the service and CloudFront),
-#                     then the rollout settings again
+#   terraform-phase2  service -> new image and this release's inputs (first deploy: creates
+#                     the service and CloudFront), then the rollout settings again
 #   web-sync          frontend + config.json to S3, invalidate CloudFront
 #   health-check      <app url><health_check> reports the new release; with a custom
 #                     domain, also asks CloudFront for it directly (logs only)
@@ -71,6 +75,10 @@ tf_req() {
   printf '%s' "$value"
 }
 tf_init() {
+  # Checksums of the pinned providers for every platform the runner runs on.
+  # Terraform only takes a provider from the plugin cache when the lock file
+  # lists it, so without this every init downloads the AWS provider again.
+  cp "$JOBS_DIR/terraform.lock.hcl" "$WORK_DIR/.terraform.lock.hcl"
   if command -v flock >/dev/null; then
     flock "$TF_PLUGIN_CACHE_DIR/.init.lock" terraform -chdir="$WORK_DIR" init -input=false -no-color -reconfigure
   else
@@ -317,6 +325,10 @@ step app-yaml
 aws s3 cp "s3://$RELEASES_BUCKET/releases/$APP/$COMMIT_SHA/app.yaml" "$TMP/app.yaml" --only-show-errors ||
   die "release $SHORT has no app.yaml in s3://$RELEASES_BUCKET/releases/$APP/$COMMIT_SHA/"
 appyaml validate "$TMP/app.yaml" --app "$APP"
+# What the release's migrate task applies (build-release); none from releases
+# built before it was published, which always run the migrate task.
+NEW_MIGRATIONS=$(aws s3 cp "s3://$RELEASES_BUCKET/releases/$APP/$COMMIT_SHA/migrations.sha256" - --only-show-errors 2>/dev/null | tr -d '[:space:]' || true)
+[[ "$NEW_MIGRATIONS" =~ ^[0-9a-f]{64}$ ]] || NEW_MIGRATIONS=""
 mapfile -t declared < <(appyaml get "$TMP/app.yaml" secrets | sed '/^$/d')
 HEALTH_PATH=$(appyaml get "$TMP/app.yaml" api.health_check)
 
@@ -346,8 +358,22 @@ echo "injecting ${#inject[@]} secrets: $(IFS=,; echo "${inject[*]:-none}")"
 [[ -z "${SECRETS_REMOVED:-}" ]] || echo "leaving out (being removed): ${SECRETS_REMOVED//:/, }"
 
 step terraform-phase1
-render_env --app-yaml "$TMP/app.yaml" --secret-names "$(IFS=:; echo "${inject[*]}")"
+render_phase2() { render_env --app-yaml "$TMP/app.yaml" --secret-names "$(IFS=:; echo "${inject[*]}")"; }
+render_phase2
 tf_init
+# The service keeps the inputs it runs with (the last apply's) through phase 1,
+# with only this release's migrate command for the migrate task. A secret added
+# or removed, or a new size, port or health check, then reaches the service
+# with the new image in phase 2, instead of first rolling the old image out
+# again with it (one more rollout, about 3.5 minutes).
+RUNNING_INPUTS=$(tf_out inputs)
+if [[ -n "$RUNNING_INPUTS" ]] &&
+  jq -e 'has("size") and has("api_port") and has("health_check_path") and has("secret_names")' <<<"$RUNNING_INPUTS" >/dev/null 2>&1; then
+  jq --slurpfile new "$WORK_DIR/main.tf.json" '.migrate_command = $new[0].module.env.migrate_command' \
+    <<<"$RUNNING_INPUTS" >"$TMP/phase1-inputs.json"
+  render_env --inputs-json "$TMP/phase1-inputs.json"
+fi
+LAST_MIGRATIONS=$(tf_out migrations)
 CURRENT_IMAGE=$(tf_out service_image)
 CURRENT_RELEASE=$(tf_out release)
 CURRENT_DEPLOY_ID=$(tf_out deploy_id)
@@ -370,44 +396,58 @@ apply_env \
   -var "release=$CURRENT_RELEASE" \
   -var "deploy_id=$CURRENT_DEPLOY_ID" \
   -var "migrate_image=$NEW_IMAGE" \
+  -var "migrations=$LAST_MIGRATIONS" \
   "${domain_vars[@]}"
+
+# The migrate task (design 5.9): one-off, in the public subnets with a public
+# IP and the env's task security group; its logs are printed, and a non-zero
+# exit stops the deploy before the service changes.
+run_migrate_task() {
+  LOG_GROUP=$(tf_req log_group_name)
+  MIGRATE_TASK_DEFINITION=$(tf_req migrate_task_definition_arn)
+  SUBNET_IDS=$(tf_req subnet_ids)
+  TASK_SECURITY_GROUP=$(tf_req task_security_group_id)
+  read -r TASK_ARN FAILURE < <(aws ecs run-task \
+    --cluster "$CLUSTER" \
+    --task-definition "$MIGRATE_TASK_DEFINITION" \
+    --launch-type FARGATE \
+    --started-by "slipway-deploy-$DEPLOY_ID" \
+    --network-configuration "awsvpcConfiguration={subnets=[$SUBNET_IDS],securityGroups=[$TASK_SECURITY_GROUP],assignPublicIp=ENABLED}" \
+    --query '[tasks[0].taskArn, failures[0].reason]' --output text)
+  [[ "$TASK_ARN" == arn:* ]] || die "could not start the migrate task: $FAILURE"
+  echo "migrate task: $TASK_ARN"
+
+  deadline=$((SECONDS + ${MIGRATE_TIMEOUT_SECONDS:-1800}))
+  while :; do
+    read -r STATUS EXIT_CODE STOP_REASON < <(aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$TASK_ARN" \
+      --query 'tasks[0].[lastStatus, containers[0].exitCode, stoppedReason]' --output text)
+    [[ "$STATUS" != STOPPED ]] || break
+    if ((SECONDS > deadline)); then
+      aws ecs stop-task --cluster "$CLUSTER" --task "$TASK_ARN" --reason "deploy-env timeout" >/dev/null || true
+      die "the migration was still running after $((${MIGRATE_TIMEOUT_SECONDS:-1800} / 60)) minutes and was stopped; the service still runs ${CURRENT_RELEASE:-nothing}"
+    fi
+    sleep 10
+  done
+
+  echo "--- migrate logs ---"
+  aws logs get-log-events --log-group-name "$LOG_GROUP" \
+    --log-stream-name "$ENV/migrate/migrate/${TASK_ARN##*/}" --start-from-head \
+    --query 'events[].message' --output text | tr '\t' '\n' || echo "(no logs)"
+  echo "--- end of migrate logs ---"
+  if [[ "$EXIT_CODE" != 0 ]]; then
+    [[ "$STOP_REASON" == None ]] && STOP_REASON=""
+    die "the migration failed (exit code $EXIT_CODE${STOP_REASON:+, $STOP_REASON}); the service still runs ${CURRENT_RELEASE:-nothing} and the deploy stopped here"
+  fi
+}
 
 step migrate
 CLUSTER=$(tf_req cluster_name)
-LOG_GROUP=$(tf_req log_group_name)
-MIGRATE_TASK_DEFINITION=$(tf_req migrate_task_definition_arn)
-SUBNET_IDS=$(tf_req subnet_ids)
-TASK_SECURITY_GROUP=$(tf_req task_security_group_id)
-read -r TASK_ARN FAILURE < <(aws ecs run-task \
-  --cluster "$CLUSTER" \
-  --task-definition "$MIGRATE_TASK_DEFINITION" \
-  --launch-type FARGATE \
-  --started-by "slipway-deploy-$DEPLOY_ID" \
-  --network-configuration "awsvpcConfiguration={subnets=[$SUBNET_IDS],securityGroups=[$TASK_SECURITY_GROUP],assignPublicIp=ENABLED}" \
-  --query '[tasks[0].taskArn, failures[0].reason]' --output text)
-[[ "$TASK_ARN" == arn:* ]] || die "could not start the migrate task: $FAILURE"
-echo "migrate task: $TASK_ARN"
-
-deadline=$((SECONDS + ${MIGRATE_TIMEOUT_SECONDS:-1800}))
-while :; do
-  read -r STATUS EXIT_CODE STOP_REASON < <(aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$TASK_ARN" \
-    --query 'tasks[0].[lastStatus, containers[0].exitCode, stoppedReason]' --output text)
-  [[ "$STATUS" != STOPPED ]] || break
-  if ((SECONDS > deadline)); then
-    aws ecs stop-task --cluster "$CLUSTER" --task "$TASK_ARN" --reason "deploy-env timeout" >/dev/null || true
-    die "the migration was still running after $((${MIGRATE_TIMEOUT_SECONDS:-1800} / 60)) minutes and was stopped; the service still runs ${CURRENT_RELEASE:-nothing}"
-  fi
-  sleep 10
-done
-
-echo "--- migrate logs ---"
-aws logs get-log-events --log-group-name "$LOG_GROUP" \
-  --log-stream-name "$ENV/migrate/migrate/${TASK_ARN##*/}" --start-from-head \
-  --query 'events[].message' --output text | tr '\t' '\n' || echo "(no logs)"
-echo "--- end of migrate logs ---"
-if [[ "$EXIT_CODE" != 0 ]]; then
-  [[ "$STOP_REASON" == None ]] && STOP_REASON=""
-  die "the migration failed (exit code $EXIT_CODE${STOP_REASON:+, $STOP_REASON}); the service still runs ${CURRENT_RELEASE:-nothing} and the deploy stopped here"
+if [[ -n "$NEW_MIGRATIONS" && "$NEW_MIGRATIONS" == "$LAST_MIGRATIONS" ]]; then
+  # Same migrations folder and command as the env's last deploy: the task would
+  # find nothing to apply, and starting it takes a minute or more.
+  echo "no new migrations since $ENV's last deploy (${NEW_MIGRATIONS:0:12}); the migrate task isn't needed"
+else
+  run_migrate_task
 fi
 
 SERVICE_NAME=$(tf_out service_name)
@@ -417,11 +457,13 @@ if [[ -n "$SERVICE_NAME" ]]; then
 fi
 
 step terraform-phase2
+render_phase2
 apply_env \
   -var "service_image=$NEW_IMAGE" \
   -var "release=$SHORT" \
   -var "deploy_id=$DEPLOY_ID" \
   -var "migrate_image=$NEW_IMAGE" \
+  -var "migrations=$NEW_MIGRATIONS" \
   "${domain_vars[@]}"
 APP_URL=$(tf_req app_url)
 SERVICE_URL=$(tf_out service_url)

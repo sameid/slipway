@@ -1,6 +1,6 @@
 // Queueing jobs. The worker (worker.ts) decides when they start; this file only
 // records what should happen, de-duplicating requests for the same work.
-import { and, desc, eq, inArray, isNull, ne, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, notInArray, sql } from "drizzle-orm";
 import { iso, type Deps } from "./deps.js";
 import { apps, jobs, pullRequests, releases, type AppRow, type JobRow, type ReleaseRow } from "./db/schema.js";
 import type { AppEnv } from "./names.js";
@@ -88,7 +88,7 @@ export function queueBuildAndDeploy(
   let release = deps.db
     .select()
     .from(releases)
-    .where(and(eq(releases.app, app), eq(releases.commitSha, sha), ne(releases.status, "failed")))
+    .where(and(eq(releases.app, app), eq(releases.commitSha, sha), notInArray(releases.status, ["failed", "superseded"])))
     .orderBy(desc(releases.id))
     .get();
   let build: JobRow | null = null;

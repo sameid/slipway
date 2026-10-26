@@ -1,5 +1,5 @@
 // JSON shapes of the plugin API (docs/contracts.md, "Deployer HTTP API").
-import { and, desc, eq, inArray } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, ne } from "drizzle-orm";
 import type { Deps } from "./deps.js";
 import { jobs, pullRequests, releases, type AppRow, type JobRow, type ReleaseRow } from "./db/schema.js";
 import { getDomain } from "./domains.js";
@@ -169,6 +169,34 @@ export function pullJson(deps: Deps, app: AppRow, number: number) {
       live =
         deploy?.status === "succeeded" ||
         (deploy?.status === "superseded" && (app.stagingReleaseId ?? 0) > release.id);
+      // A later merge's deploy superseded this one's (latest merge wins); that
+      // deploy carries this PR's change, so its progress and failure are this PR's.
+      if (deploy?.status === "superseded" && !live) {
+        const carrier = deps.db
+          .select()
+          .from(jobs)
+          .where(
+            and(
+              eq(jobs.app, app.name),
+              eq(jobs.env, "staging"),
+              eq(jobs.kind, "deploy"),
+              gt(jobs.id, deploy.id),
+              gt(jobs.releaseId, release.id),
+              ne(jobs.status, "superseded"),
+            ),
+          )
+          .orderBy(asc(jobs.id))
+          .get();
+        if (carrier) {
+          deploy = carrier;
+          build = deps.db
+            .select()
+            .from(jobs)
+            .where(and(eq(jobs.kind, "build"), eq(jobs.releaseId, carrier.releaseId ?? -1)))
+            .orderBy(desc(jobs.id))
+            .get();
+        }
+      }
     }
   }
 

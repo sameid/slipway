@@ -50,7 +50,8 @@ export const releases = sqliteTable(
     commitSha: text("commit_sha").notNull(),
     imageDigest: text("image_digest"), // sha256:...
     webArtifact: text("web_artifact"), // s3://.../web.tgz
-    status: text().notNull(), // building | ready | failed
+    // building | ready | failed | superseded (a newer merge's build replaced it before it started)
+    status: text().notNull(),
     runId: text("run_id"), // the runner's build-release run
     // When type check, lint and tests passed on this commit (a verify job, which
     // someone starts on the dashboard). Prod only takes verified releases.

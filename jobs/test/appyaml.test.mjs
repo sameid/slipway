@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { parseAppYaml, renderEnv, renderShared, inputsFromConfig, main, ENV_OUTPUTS, linksOutside, secretNames } from "../appyaml.mjs";
+import { parseAppYaml, renderEnv, renderShared, inputsFromConfig, main, ENV_OUTPUTS, linksOutside, migrationsHash, secretNames } from "../appyaml.mjs";
 
 const VALID = `
 name: my-app
@@ -109,7 +109,43 @@ test("renders the env root config with a relative module source and the contract
   assert.equal(root.module.env.custom_domain, "${var.custom_domain}");
   assert.equal(root.module.env.certificate_arn, "${var.certificate_arn}");
   assert.deepEqual(root.variable.custom_domain, { type: "string", default: "" });
-  assert.deepEqual(Object.keys(root.output), ENV_OUTPUTS);
+  assert.deepEqual(Object.keys(root.output), [...ENV_OUTPUTS, "migrations"]);
+  // Kept in state for the next deploy; the module never sees it.
+  assert.deepEqual(root.variable.migrations, { type: "string", default: "" });
+  assert.equal(root.output.migrations.value, "${var.migrations}");
+  assert.equal(root.module.env.migrations, undefined);
+});
+
+test("migrations-hash: changes with api/drizzle and the migrate command, nothing else", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "migrations-"));
+  try {
+    const { config } = parseAppYaml(VALID);
+    const write = (file, text) => {
+      mkdirSync(path.dirname(path.join(dir, file)), { recursive: true });
+      writeFileSync(path.join(dir, file), text);
+    };
+    const none = migrationsHash(dir, config);
+    assert.match(none, /^[0-9a-f]{64}$/);
+    write("api/drizzle/0000_init.sql", "create table a (id int);");
+    write("api/drizzle/meta/_journal.json", "{}");
+    const first = migrationsHash(dir, config);
+    assert.notEqual(first, none);
+    write("api/src/routes.ts", "export {};");
+    write("web/src/App.tsx", "export {};");
+    assert.equal(migrationsHash(dir, config), first);
+    write("api/drizzle/0001_more.sql", "alter table a add b int;");
+    const second = migrationsHash(dir, config);
+    assert.notEqual(second, first);
+    write("api/drizzle/0001_more.sql", "alter table a add c int;");
+    assert.notEqual(migrationsHash(dir, config), second);
+    const other = { ...config, api: { ...config.api, migrate_command: ["node", "dist/other.js"] } };
+    assert.notEqual(migrationsHash(dir, other), migrationsHash(dir, config));
+
+    write("app.yaml", VALID);
+    assert.equal(main(["migrations-hash", dir, "--app", "my-app"]), migrationsHash(dir, config));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("renders the shared root config", () => {

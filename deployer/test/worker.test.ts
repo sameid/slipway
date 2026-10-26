@@ -157,6 +157,90 @@ describe("superseding", () => {
     expect(getRelease(t.deps, getApp(t.deps, "loan-tracker")!.stagingReleaseId)!.commitSha).toBe(shas[2]);
   });
 
+  describe("latest merge wins", () => {
+    const REPO = "acme/loan-tracker";
+    /** Merge PR #n: a commit on main, the PR row the merge leaves, and the build and deploy it queues. */
+    const merge = (t: ReturnType<typeof setup>, n: number) => {
+      const sha = t.github.pushToMain(REPO, { [`f${n}`]: "x" });
+      upsertPull(t.deps, "loan-tracker", n, { headSha: "c".repeat(40), status: "merged", mergedSha: sha });
+      queueBuildAndDeploy(t.deps, "loan-tracker", sha, "github");
+      return sha;
+    };
+    const releaseOf = (t: ReturnType<typeof setup>, sha: string) =>
+      t.deps.db.select().from(releases).where(eq(releases.commitSha, sha)).get()!;
+    /** A release's status and its jobs', in order. */
+    const of = (t: ReturnType<typeof setup>, sha: string) => {
+      const release = releaseOf(t, sha);
+      return [release.status, ...jobsOf(t).filter((j) => j.releaseId === release.id).map((j) => `${j.kind}:${j.status}`)];
+    };
+    const app = (t: ReturnType<typeof setup>) => getApp(t.deps, "loan-tracker")!;
+
+    it("builds and deploys only the newest of several merges, and tells each merged PR", async () => {
+      const t = setup();
+      await liveApp(t);
+      const a = merge(t, 1);
+      await t.worker.tick(); // A's build starts
+      const b = merge(t, 2);
+      const c = merge(t, 3);
+      await t.worker.tick();
+      // A's build is already running, so it finishes; B's never starts. Only C deploys.
+      expect(of(t, a)).toEqual(["building", "build:running", "deploy:superseded"]);
+      expect(of(t, b)).toEqual(["superseded", "build:superseded", "deploy:superseded"]);
+      expect(of(t, c)).toEqual(["building", "build:queued", "deploy:queued"]);
+      // B's PR follows the deploy that carries it.
+      const carrier = jobsOf(t).find((j) => j.kind === "deploy" && j.releaseId === releaseOf(t, c).id)!;
+      expect(pullJson(t.deps, app(t), 2)).toMatchObject({ live: false, deploy: { id: carrier.id, status: "queued" }, failure: null });
+
+      await finishRunning(t); // A's build
+      await finishRunning(t); // C's build
+      await finishRunning(t); // C's deploy
+      expect(releaseOf(t, a).status).toBe("ready");
+      expect(getRelease(t.deps, app(t).stagingReleaseId)!.commitSha).toBe(c);
+      for (const n of [1, 2, 3]) expect(pullJson(t.deps, app(t), n).live).toBe(true);
+      const live = t.github.repo(REPO)!.comments.filter((x) => x.body.startsWith("Live on staging"));
+      expect(live.map((x) => [x.number, x.body.includes("a later merge that includes this PR")]).sort()).toEqual([
+        [1, true],
+        [2, true],
+        [3, false],
+      ]);
+    });
+
+    it("deploys the newest release that built when the latest build fails", async () => {
+      const t = setup();
+      await liveApp(t);
+      const a = merge(t, 1);
+      await t.worker.tick();
+      merge(t, 2);
+      const c = merge(t, 3);
+      await t.worker.tick();
+      await finishRunning(t); // A builds; C's build starts
+      await finishRunning(t, "failed", () => true, { failStep: "web-build", error: "Could not resolve ./App" });
+      expect(of(t, c)).toEqual(["failed", "build:failed", "deploy:failed"]);
+      // A built, so staging gets it instead of nothing.
+      expect(of(t, a)).toEqual(["ready", "build:succeeded", "deploy:superseded", "deploy:running"]);
+      // B never built; the build that would have carried it failed, and says why.
+      expect(pullJson(t.deps, app(t), 2)).toMatchObject({ live: false, failure: { step: "web-build", message: "Could not resolve ./App" } });
+      expect(pullJson(t.deps, app(t), 3).failure).toMatchObject({ step: "web-build" });
+
+      await finishRunning(t);
+      expect(getRelease(t.deps, app(t).stagingReleaseId)!.commitSha).toBe(a);
+      expect(pullJson(t.deps, app(t), 1).live).toBe(true);
+      expect(pullJson(t.deps, app(t), 2).live).toBe(false);
+    });
+
+    it("builds a skipped commit again if it's asked for later", async () => {
+      const t = setup();
+      await liveApp(t);
+      const a = merge(t, 1);
+      merge(t, 2);
+      await t.worker.tick();
+      expect(of(t, a)[0]).toBe("superseded");
+      queueBuildAndDeploy(t.deps, "loan-tracker", a, "system");
+      const rows = t.deps.db.select().from(releases).where(eq(releases.commitSha, a)).all();
+      expect(rows.map((r) => r.status)).toEqual(["superseded", "building"]);
+    });
+  });
+
   it("supersedes queued checks when the PR gets a new head", async () => {
     const t = setup();
     await liveApp(t);

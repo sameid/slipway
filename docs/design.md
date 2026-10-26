@@ -41,6 +41,7 @@ These changes came out of building the platform and checking the region. Where t
 14. **Custom domains (bring your own).** Someone who owns a domain can attach it to an app's staging or prod on the dashboard; see 5.10. Buying domains is still out of scope.
 15. **Secrets without a pull request.** A secret no longer has to be declared in `app.yaml` before it can be set. Every deploy injects all of an environment's parameters, and `secrets:` lists the required ones, which deploys check. Saving can deploy now or leave it to the next deploy, and secrets can be removed on the dashboard; see 5.8.
 16. **Verify before prod.** A PR's check is quick: `app.yaml`, symbolic links and a secret scan, then the PR merges. The release build skips type check, lint and tests as well, so a merge reaches staging in minutes. Those three run when someone presses **Verify** on a release on the dashboard (a `verify` job), and prod, whether by Promote or by a rollback, only takes a release whose commit passed them. Releases that built before this change count as verified, since their builds ran all three. See 5.6, 5.7 and 6.
+17. **Latest merge wins, and shorter deploys.** When several merges queue builds for one app, only the newest queued build runs (main has every older merge in it), and only the newest staging deploy; a build already running finishes, and staging gets it if the newest one fails. Phase 1 of a deploy never changes the running service (a new secret or size goes in with the new image in phase 2), the migrate task is skipped when the release's migrations match the environment's last deploy, and Terraform takes its providers from a cache. See 5.5 and 5.6.
 
 ## 1. Summary
 
@@ -503,7 +504,7 @@ The `jobs` table is also the audit log: who deployed what, where, when and with 
 **Worker loop** (runs every 15 seconds inside the same process)
 
 1. For each `(app, env)` pair with no running job, pick its oldest queued job and start it. This guarantees two deploys of the same app and environment never overlap, while different apps run in parallel.
-2. If several deploys to staging are queued for one app, run only the newest and mark the others `superseded`. The same applies to checks for a PR that has received new commits.
+2. If several builds of `main` are queued for one app, run only the newest and mark the others (and their releases) `superseded`: `main` only moves forward, so the newest has every older change. Likewise run only the newest of several queued deploys to staging, and the newest check for a PR that has received new commits. A merged PR whose deploy was superseded follows the later deploy that carries it.
 3. To start a `check`, `build` or `verify` job, download the commit's zipball from GitHub with the App's credentials, upload it to the sources bucket, and call `StartBuild` with that S3 object as the source.
 4. For running jobs, call CodeBuild `BatchGetBuilds` and update their status.
 5. On a finished `check` job, post the commit status and, if it passed and auto-merge applies, merge the PR (see 5.7). A passed `verify` job marks every release of its commit verified.
@@ -586,9 +587,9 @@ Inputs: `APP`, `COMMIT_SHA`, `SOURCE_S3_KEY`, `MODE` (`check`, `release` or `ver
 Inputs: `APP`, `ENV` (`shared`, `staging`, `prod`), `IMAGE_DIGEST`, `WEB_ARTIFACT`, `ACTION` (`apply` or `destroy`).
 
 1. Generate the Terraform root config for this app and environment from `app.yaml` and the versioned platform module. For `staging` and `prod`, check that every secret declared in `app.yaml` exists in Parameter Store for this environment, and fail with the list of missing names if not.
-2. **Phase 1:** `terraform init` with the state key `apps/<APP>/<ENV>.tfstate`, then `terraform apply` with `migrate_image` set to the new release and `service_image` left at the release currently running. This creates or updates everything except the running service. On an environment's first deploy, the service isn't created yet.
-3. **Migrate:** run the `migrate` task and wait for it to exit (see 5.9). If it fails, stop here: the service is still running the previous release against an unchanged database.
-4. **Phase 2:** `terraform apply` with `service_image` set to the new release, and wait for the ECS deployment to become stable.
+2. **Phase 1:** `terraform init` with the state key `apps/<APP>/<ENV>.tfstate`, then `terraform apply` with `migrate_image` set to the new release and the service left exactly as it runs: its image, and the secrets, size, port and health check of the last apply. This creates or updates everything except the running service, so phase 1 never rolls the old image out again. On an environment's first deploy, the service isn't created yet.
+3. **Migrate:** run the `migrate` task and wait for it to exit (see 5.9). If it fails, stop here: the service is still running the previous release against an unchanged database. Skipped when the release's migrations (a hash of `api/drizzle/` and `migrate_command`, published by the build) are the ones the environment's last deploy applied.
+4. **Phase 2:** `terraform apply` with `service_image` set to the new release and this release's inputs, and wait for the ECS deployment to become stable.
 5. Sync the frontend artifact to the environment's S3 bucket and write `config.json` (the environment's name and the release), then invalidate CloudFront. The frontend goes last so it never calls API endpoints that aren't live yet.
 6. Call `/api/health` through the CloudFront URL until it succeeds or times out.
 7. Export the CloudFront URL for the deployer.
