@@ -115,54 +115,16 @@ HEALTH_CHECK_INTERVAL=10
 HEALTHY_THRESHOLD=2
 
 # Express Mode's rollback alarm counts 4XX answers as errors once there are 5 in
-# a minute, so on a quiet app one visitor getting 401s (signed out) or 404s
-# rolls back a good release. The service is pointed at a copy that counts 5XX
-# only, with the same metrics, threshold and periods.
-# Express Mode tags its own alarm AmazonECSManaged, so that one is left as it is
-# and the copy belongs to the platform (deleted with the environment). Anything
-# but the formula Express Mode used when this was written is left alone.
-server_error_alarm_name() { echo "$1/$2/ServerErrorRollbackAlarm"; } # cluster service
-SERVER_ERROR_ALARM=""
-set_server_error_alarm() { # cluster service; sets SERVER_ERROR_ALARM
-  local express="$1/$2/RollbackAlarm" ours want current
-  ours=$(server_error_alarm_name "$1" "$2")
-  SERVER_ERROR_ALARM=""
-  want=$(aws cloudwatch describe-alarms --alarm-names "$express" --query 'MetricAlarms[0]' --output json) || return 1
-  want=$(jq -c --arg name "$ours" '
-    def rate: .Id | test("^em[0-9]+$");
-    def express_formula: (.Id[1:]) as $m
-      | "100 * (IF(\($m)_4xx < 5, 0, \($m)_4xx) + \($m)_5xx) / FILL(\($m)_total, 1)";
-    if . == null or ([.Metrics[]? | select(rate)] | length) == 0
-      or any(.Metrics[] | select(rate); .Expression != express_formula) then empty
-    else {
-      AlarmName: $name,
-      AlarmDescription: "Rate of 5XX errors (slipway: 4XX answers, such as 401s and 404s, are not a failed release)",
-      ActionsEnabled, EvaluationPeriods, DatapointsToAlarm, Threshold, ComparisonOperator, TreatMissingData,
-      Metrics: [.Metrics[] | select(.Id | endswith("_4xx") | not)
-        | if rate then (.Id[1:]) as $m
-            | .Expression = "100 * \($m)_5xx / FILL(\($m)_total, 1)" | .Label = "5XX errors percentage, \(.Label | sub("^.* for "; ""))"
-          else . end]
-    } end' <<<"$want") || return 1
-  if [[ -z "$want" ]]; then
-    echo "rollback alarm: $express isn't in the shape this expects; the service keeps its alarms"
-    return 0
-  fi
-  current=$(aws cloudwatch describe-alarms --alarm-names "$ours" --output json \
-    --query 'MetricAlarms[0].{AlarmName: AlarmName, AlarmDescription: AlarmDescription, ActionsEnabled: ActionsEnabled, EvaluationPeriods: EvaluationPeriods, DatapointsToAlarm: DatapointsToAlarm, Threshold: Threshold, ComparisonOperator: ComparisonOperator, TreatMissingData: TreatMissingData, Metrics: Metrics}') ||
-    return 1
-  if [[ "$(jq -cS . <<<"$current")" != "$(jq -cS . <<<"$want")" ]]; then
-    # Tags only apply when the alarm is created.
-    aws cloudwatch put-metric-alarm --cli-input-json "$(jq -c --arg app "$APP" --arg env "$ENV" \
-      '. + {Tags: [{Key: "app", Value: $app}, {Key: "env", Value: $env}, {Key: "platform", Value: "slipway"}]}' <<<"$want")" ||
-      return 1
-  fi
-  SERVER_ERROR_ALARM=$ours
-}
+# a minute, so on a quiet app one visitor getting 401s or 404s can roll back a
+# good release. It is left as it is: a copy named on the service lasted only
+# until the next update, when Express Mode put its own back on the list, and its
+# own alarm rewritten to count 5XX only was restored at the start of every
+# rollout. The short prod waits above are what narrow the window instead.
 
 # Prints each setting as it was, and what it changed. Stops at the first failed
 # call (set -e doesn't apply here: rollout_settings calls it from ||).
 set_rollout_settings() { # cluster service
-  local cluster=$1 service=$2 canary=1 final=0 config want was raw tg interval healthy
+  local cluster=$1 service=$2 canary=1 final=0 config want was raw tg interval healthy copy
   [[ "$ENV" != staging ]] || { canary=0 final=0; }
   config=$(aws ecs describe-services --cluster "$cluster" --services "$service" \
     --query 'services[0].deploymentConfiguration' --output json) || return 1
@@ -180,19 +142,19 @@ set_rollout_settings() { # cluster service
     fi
   fi
 
-  set_server_error_alarm "$cluster" "$service" || return 1
-  if [[ -n "$SERVER_ERROR_ALARM" ]]; then
-    was=$(jq -r '.alarms.alarmNames // [] | join(", ")' <<<"$config") || return 1
-    want=$(jq -c --arg alarm "$SERVER_ERROR_ALARM" '.alarms.alarmNames = [$alarm]' <<<"$want") || return 1
-    if [[ "$was" == "$SERVER_ERROR_ALARM" ]]; then
-      echo "rollback alarm: 5XX errors only (already set)"
-    else
-      echo "rollback alarm: ${was:-none} -> $SERVER_ERROR_ALARM (5XX errors only)"
-    fi
-  fi
+  # The copy of the alarm an earlier release named on the service instead (see
+  # above): off the list, then deleted. Express Mode's own is the one it uses.
+  copy="$cluster/$service/ServerErrorRollbackAlarm"
+  want=$(jq -c --arg copy "$copy" --arg express "$cluster/$service/RollbackAlarm" \
+    'if (.alarms.alarmNames // []) | index($copy) then .alarms.alarmNames = ((.alarms.alarmNames - [$copy]) + [$express] | unique) else . end' \
+    <<<"$want") || return 1
   if [[ "$(jq -cS . <<<"$config")" != "$(jq -cS . <<<"$want")" ]]; then
     aws ecs update-service --cluster "$cluster" --service "$service" --deployment-configuration "$want" \
       --query 'service.serviceName' --output text >/dev/null || return 1
+  fi
+  if [[ "$(aws cloudwatch describe-alarms --alarm-names "$copy" --query 'length(MetricAlarms)' --output text)" != 0 ]]; then
+    aws cloudwatch delete-alarms --alarm-names "$copy" || return 1
+    echo "rollback alarm: deleted the earlier copy, $copy"
   fi
 
   # The service's revision names both of its target groups: each rollout moves
@@ -300,8 +262,9 @@ if [[ "$ACTION" == destroy ]]; then
     tf_destroy "${current[@]}" -var destroying=true
   fi
   step delete-alarms
-  # The rollback alarm copies the platform made (set_server_error_alarm);
-  # Express Mode deletes its own with the service.
+  # Copies of the rollback alarm an earlier release made, if this environment
+  # wasn't deployed again since (set_rollout_settings deletes them); Express
+  # Mode deletes its own alarm with the service.
   mapfile -t alarms < <(aws cloudwatch describe-alarms --alarm-name-prefix "app-$APP-$ENV/" \
     --query "MetricAlarms[?ends_with(AlarmName, '/ServerErrorRollbackAlarm')].AlarmName" --output text |
     tr '\t' '\n' | sed '/^$/d;/^None$/d')
